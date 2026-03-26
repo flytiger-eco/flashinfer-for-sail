@@ -495,7 +495,7 @@ template <typename IdType>
 inline auto PrefillSplitQOKVIndptr(IdType* qo_indptr_h, IdType* kv_indptr_h,
                                    uint32_t total_num_rows, uint32_t batch_size,
                                    uint32_t num_qo_heads, uint32_t num_kv_heads, uint32_t head_dim,
-                                   uint32_t page_size, uint32_t max_batch_size_if_split,
+                                   uint32_t page_size, uint32_t max_grid_size,
                                    bool enable_cuda_graph, int32_t window_left,
                                    int32_t fixed_split_size, bool disable_split_kv) {
   std::vector<IdType> request_indices, qo_tile_indices, kv_tile_indices, merge_indptr, o_indptr;
@@ -562,6 +562,20 @@ inline auto PrefillSplitQOKVIndptr(IdType* qo_indptr_h, IdType* kv_indptr_h,
         std::min(window_left >= 0 ? ceil_div(window_left + cta_tile_q, page_size) : kv_len_arr[i],
                  kv_len_arr[i]);
   }
+#if SAIL_ENABLE_FULL_FEATS
+  auto compute_capacity = GetCudaComputeCapability();
+  if (compute_capacity.first == 8 && compute_capacity.second == 0) {
+    // For a better occ when we using smaller tile size
+    switch (cta_tile_q) {
+      case 8:
+        max_grid_size *= 6;
+        break;
+      default:
+        break;
+    }
+  }
+#endif
+  uint32_t max_batch_size_if_split = max_grid_size / num_kv_heads;
   bool split_kv = false;
   int64_t kv_chunk_size;
   if (disable_split_kv) {
@@ -717,13 +731,12 @@ inline cudaError_t PrefillPlan(void* float_buffer, size_t float_workspace_size_i
   int num_blocks_per_sm = 2;
   int64_t available_ctas = static_cast<int64_t>(num_blocks_per_sm) * num_sm - num_colocated_ctas;
   int max_grid_size = static_cast<int>(std::max<int64_t>(0, available_ctas));
-  uint32_t max_batch_size_if_split = max_grid_size / num_kv_heads;
 
   // step 2: determine kv_chunk_size
   auto [split_kv, new_batch_size, padded_batch_size, cta_tile_q, kv_chunk_size, request_indices_vec,
         qo_tile_indices_vec, kv_tile_indices_vec, merge_indptr_vec, o_indptr_vec] =
       PrefillSplitQOKVIndptr(qo_indptr_h, kv_indptr_h, total_num_rows, batch_size, num_qo_heads,
-                             num_kv_heads, head_dim_vo, page_size, max_batch_size_if_split,
+                             num_kv_heads, head_dim_vo, page_size, max_grid_size,
                              enable_cuda_graph, window_left, fixed_split_size, disable_split_kv);
 
   plan_info.cta_tile_q = cta_tile_q;
@@ -1468,16 +1481,38 @@ inline cudaError_t MLAPlan(void* float_buffer, size_t float_workspace_size_in_by
   }
   int avg_packed_qo_len = accum_packed_qo_len / batch_size;
 
-  int cluster_size;
-  if (avg_packed_qo_len > 64) {
-    cluster_size = 2;  // two ctas in a cluster
-  } else {
-    cluster_size = 1;  // one cta in a cluster
-  }
+  auto compute_capacity = GetCudaComputeCapability();
+  const int cluster_size = [&]() -> int {
+#if SAIL_ENABLE_FULL_FEATS
+    if (compute_capacity.first == 8 && compute_capacity.second == 0) {
+      if (avg_packed_qo_len > 32) {
+        return 2; // two ctas in a cluster
+      } else {
+        return 1;  // one cta in a cluster
+      }
+    } else
+#endif
+    {
+      if (avg_packed_qo_len > 64) {
+        return 2;  // two ctas in a cluster
+      } else {
+        return 1;  // one cta in a cluster
+      }
+    }
+  }();
   uint32_t num_clusters = num_sm / cluster_size;
   plan_info.num_blks_x = cluster_size;
   plan_info.num_blks_y = num_clusters;
-  const int cta_tile_q = 64;
+  const int cta_tile_q = [&]() -> int {
+#if SAIL_ENABLE_FULL_FEATS
+    if (compute_capacity.first == 8 && compute_capacity.second == 0) {
+      return 32;
+    } else
+#endif
+    {
+      return 64;
+    }
+  }();
   int cluster_tile_q = cluster_size * cta_tile_q;
 
   int64_t total_kv_lens = 0;
@@ -1535,7 +1570,7 @@ inline cudaError_t MLAPlan(void* float_buffer, size_t float_workspace_size_in_by
       int kv_start = 0;
       bool split_kv = remaining_len > kv_len_limit;
       int row_tile_size = std::min(cluster_tile_q, packed_qo_len - qo_tile_idx * cluster_tile_q);
-      if (split_kv) {
+    if (split_kv) {
         /*
          * Proof(Zihao): merge_cta_counter <= num_sm (num_sm == num_clusters * cluster_size)
          *
