@@ -319,9 +319,11 @@ def gen_attention(
     # OAI OSS
     if add_oai_oss:
         from .jit.attention import gen_batch_prefill_attention_sink_module
+         # For it will use fa3 feature which requires sm_90a
+        backends = ["fa2"] if 'PPU_SDK' in os.environ.keys() else ["fa2", "fa3"]
 
         for dtype in f16_dtype_:
-            for backend in ["fa2", "fa3"]:
+            for backend in backends:
                 for use_swa in [True, False]:
                     yield gen_batch_prefill_attention_sink_module(
                         backend=backend,
@@ -540,19 +542,22 @@ def gen_all_modules(
             jit_specs.append(gen_fp4_quantization_sm120f_module())
 
     if add_comm:
-        from .jit.comm import (
-            gen_comm_alltoall_module,
-            gen_dcp_alltoall_module,
-            gen_moe_alltoall_module,
-            gen_trtllm_comm_module,
-            gen_trtllm_mnnvl_comm_module,
-            gen_vllm_comm_module,
-        )
+        from .jit.comm import gen_trtllm_comm_module, gen_vllm_comm_module
+        USE_SAIL = 'PPU_SDK' in os.environ.keys()
+        # For nvshmen is not evalued in flashinfer so we disable this module so far,
+        # and we do not support trtllm module either.
+        if not USE_SAIL:
+            from .jit.comm import gen_nvshmem_module
+            from .jit.comm import gen_comm_alltoall_module
+            from .jit.comm import gen_trtllm_mnnvl_comm_module
+            from .jit.comm import gen_moe_alltoall_module
 
-        jit_specs.append(gen_comm_alltoall_module())
+        if not USE_SAIL:
+            jit_specs.append(gen_comm_alltoall_module())
         if has_sm100:
             jit_specs.append(gen_trtllm_comm_module())
-            jit_specs.append(gen_trtllm_mnnvl_comm_module())
+            if not USE_SAIL:
+                jit_specs.append(gen_trtllm_mnnvl_comm_module())
             jit_specs.append(gen_moe_alltoall_module())
             # dcp_alltoall: kernel itself supports SM90+, but ptxas 12.6.0 has
             # a known state-space inference bug on cp.async.bulk that aborts
@@ -793,7 +798,7 @@ def parse_head_dim(head_dim: str) -> Tuple[int, int]:
 def get_default_config():
     """Get default AOT configuration"""
     return {
-        "fa2_head_dim": [(64, 64), (128, 128), (256, 256)],
+        "fa2_head_dim": [(64, 64), (128, 128),  (192, 128), (256, 256)],
         "fa3_head_dim": [(192, 128), (128, 128), (64, 64), (256, 256)],
         "f16_dtype": [torch.float16, torch.bfloat16],
         "f8_dtype": [torch.float8_e4m3fn],

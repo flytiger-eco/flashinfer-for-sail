@@ -463,7 +463,13 @@ def gen_jit_spec(
         cflags += extra_cflags
     if extra_cuda_cflags is not None:
         cuda_cflags += extra_cuda_cflags
-
+    if extra_include_paths is not None:
+        extra_include_paths = [Path(x) for x in extra_include_paths]
+    sources = [Path(x) for x in sources]
+    USE_SAIL = 'PPU_SDK' in os.environ.keys()
+    if USE_SAIL:
+        cflags.append("-DUSE_SAIL")
+        cuda_cflags.append("-DUSE_SAIL")
     spec = JitSpec(
         name=name,
         sources=[Path(x) for x in sources],

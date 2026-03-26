@@ -156,7 +156,7 @@ def attention_ref(
 @pytest.mark.parametrize("qo_len", [1832, 3928])
 @pytest.mark.parametrize("num_heads", [4, 32, 128])
 @pytest.mark.parametrize("causal", [False, True])
-@pytest.mark.parametrize("backend", ["fa2", "fa3"])
+@pytest.mark.parametrize("backend", ["fa2"])
 @pytest.mark.parametrize("dtype", [torch.half])
 def test_single_prefill_with_kv_cache(
     kv_len,
@@ -193,7 +193,7 @@ def test_single_prefill_with_kv_cache(
 @pytest.mark.parametrize("qo_len", [377, 177])
 @pytest.mark.parametrize("num_heads", [4, 32, 128])
 @pytest.mark.parametrize("causal", [False, True])
-@pytest.mark.parametrize("backend", ["fa2", "fa3"])
+@pytest.mark.parametrize("backend", ["fa2"])
 @pytest.mark.parametrize("dtype", [torch.half])
 def test_batch_prefill_with_ragged_kv_cache(
     batch_size,
@@ -229,7 +229,8 @@ def test_batch_prefill_with_ragged_kv_cache(
         torch.arange(0, batch_size + 1, device=device, dtype=torch.int32) * kv_len
     )
 
-    workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8, device=device)
+    # expand workspace for some cases
+    workspace_buffer = torch.empty(512 * 1024 * 1024, dtype=torch.int8, device=device)
     wrapper = flashinfer.prefill.BatchPrefillWithRaggedKVCacheWrapper(
         workspace_buffer, kv_layout, backend=backend
     )

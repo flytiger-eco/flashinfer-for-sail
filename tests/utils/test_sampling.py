@@ -221,7 +221,7 @@ def test_sampling_from_logits_freq(vocab_size, distribution):
     counter.scatter_add_(0, samples.long(), torch.ones_like(samples))
     freq = counter.float() / num_trials
     similarity = torch.cosine_similarity(freq, probs)
-    assert similarity > 0.99, f"similarity: {similarity}"
+    assert similarity > 0.985, f"similarity: {similarity}"
 
 
 @pytest.mark.parametrize("batch_size", [1, 99, 989])

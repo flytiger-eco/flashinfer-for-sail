@@ -74,11 +74,13 @@ struct cutlass_dtype<__nv_fp8_e5m2> {
   using type = cutlass::float_e5m2_t;
 };
 
+#ifdef USE_SAIL_FP8_E8M0
 #if CUDA_VERSION >= 12080
 template <>
 struct cutlass_dtype<__nv_fp8_e8m0> {
   using type = cutlass::float_ue8m0_t;
 };
+#endif
 
 #if defined(FLASHINFER_ENABLE_FP4_E2M1)
 template <>
