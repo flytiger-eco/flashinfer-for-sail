@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "exception.h"
+#include "macros.cuh"
 
 #define STR_HELPER(x) #x
 #define STR(x) STR_HELPER(x)
@@ -95,6 +96,9 @@
   if (max_mma_kv >= 8) {                                 \
     constexpr size_t NUM_MMA_KV = 8;                     \
     __VA_ARGS__                                          \
+  } else if (max_mma_kv >= 6) {                          \
+    constexpr size_t NUM_MMA_KV = 6;                     \
+    __VA_ARGS__                                          \
   } else if (max_mma_kv >= 4) {                          \
     constexpr size_t NUM_MMA_KV = 4;                     \
     __VA_ARGS__                                          \
@@ -110,6 +114,36 @@
     FLASHINFER_ERROR(err_msg.str());                     \
   }
 
+#if SAIL_ENABLE_FULL_FEATS
+#define DISPATCH_CTA_TILE_Q(cta_tile_q, CTA_TILE_Q, ...)   \
+  switch (cta_tile_q) {                                    \
+    case 128: {                                            \
+      constexpr uint32_t CTA_TILE_Q = 128;                 \
+      __VA_ARGS__                                          \
+      break;                                               \
+    }                                                      \
+    case 64: {                                             \
+      constexpr uint32_t CTA_TILE_Q = 64;                  \
+      __VA_ARGS__                                          \
+      break;                                               \
+    }                                                      \
+    case 16: {                                             \
+      constexpr uint32_t CTA_TILE_Q = 16;                  \
+      __VA_ARGS__                                          \
+      break;                                               \
+    }                                                      \
+    case 8: {                                              \
+      constexpr uint32_t CTA_TILE_Q = 8;                  \
+      __VA_ARGS__                                          \
+      break;                                               \
+    }                                                      \
+    default: {                                             \
+      std::ostringstream err_msg;                          \
+      err_msg << "Unsupported cta_tile_q: " << cta_tile_q; \
+      FLASHINFER_ERROR(err_msg.str());                     \
+    }                                                      \
+  }
+#else
 #define DISPATCH_CTA_TILE_Q(cta_tile_q, CTA_TILE_Q, ...)   \
   switch (cta_tile_q) {                                    \
     case 128: {                                            \
@@ -133,6 +167,7 @@
       FLASHINFER_ERROR(err_msg.str());                     \
     }                                                      \
   }
+#endif
 
 #define DISPATCH_GQA_GROUP_SIZE(group_size, GROUP_SIZE, ...) \
   if (group_size == 1) {                                     \
@@ -382,10 +417,10 @@ inline void DebugPrintCUDAArray(T* device_ptr, size_t size, std::string prefix =
 }
 
 inline uint32_t FA2DetermineCtaTileQ(int64_t avg_packed_qo_len, uint32_t head_dim) {
+  auto compute_capacity = GetCudaComputeCapability();
   if (avg_packed_qo_len > 64 && head_dim < 256) {
-    return 128;
+      return 64;
   } else {
-    auto compute_capacity = GetCudaComputeCapability();
     if (compute_capacity.first >= 8) {
       // Ampere or newer
       if (avg_packed_qo_len > 16) {
@@ -393,6 +428,11 @@ inline uint32_t FA2DetermineCtaTileQ(int64_t avg_packed_qo_len, uint32_t head_di
         return 64;
       } else {
         // avg_packed_qo_len <= 16
+#if SAIL_ENABLE_FULL_FEATS
+      if (compute_capacity.first == 8 && compute_capacity.second == 0) {
+        return (avg_packed_qo_len > 8) ? 16 : 8;
+      }
+#endif
         return 16;
       }
     } else {

@@ -184,6 +184,32 @@ struct smem_t {
   __device__ __forceinline__ void store_128b(uint32_t offset, T* gptr) {
     *reinterpret_cast<b128_t*>(gptr) = *(base + offset);
   }
+
+  #if SAIL_ARCH_SM80_AIU
+  template<bool is_trans>
+  __device__ __forceinline__ void ldmatrix_m8n8x4_aiu(uint32_t offset, uint32_t* R, cp_async::cube_load_params* AIU_para) {
+    b128_t* smem_ptr = base + offset;
+    mma::ldmatrix_m8n8x4_aiu<b128_t, is_trans>(R, smem_ptr, AIU_para);
+  }
+
+  template<bool is_trans>
+  __device__ __forceinline__ void ldmatrix_m8n8x4_left_half_aiu(uint32_t offset, uint32_t* R, cp_async::cube_load_params* AIU_para) {
+    b128_t* smem_ptr = base + offset;
+    mma::ldmatrix_m8n8x4_left_half_aiu<b128_t, is_trans>(R, smem_ptr, AIU_para);
+  }
+
+  template<bool is_trans>
+  __device__ __forceinline__ void ldmatrix_m8n8x4_right_half_aiu(uint32_t offset, uint32_t* R, cp_async::cube_load_params* AIU_para) {
+    b128_t* smem_ptr = base + offset;
+    mma::ldmatrix_m8n8x4_right_half_aiu<b128_t, is_trans>(R, smem_ptr, AIU_para);
+  }
+
+  template <typename Dtype, bool trans, typename T>
+  __device__ __forceinline__ void load_128b_async_aiu(uint32_t offset, const T* gptr, cp_async::cube_load_params* AIU_para) {
+    b128_t* smem_ptr = base + offset;
+    cp_async::load_128b_aiu<Dtype, trans>(smem_ptr, reinterpret_cast<const b128_t*>(gptr), AIU_para);
+  }
+  #endif
 };
 
 }  // namespace flashinfer

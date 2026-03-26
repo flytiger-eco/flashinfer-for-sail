@@ -17,6 +17,8 @@
 #define FLASHINFER_CP_ASYNC_CUH_
 
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
+#include "macros.cuh"
 
 #include <cstdint>
 
@@ -33,6 +35,56 @@ enum class PrefetchMode {
   kNoPrefetch,  // Do not fetch additional data from global memory to L2
   kPrefetch     // Fetch additional data from global memory to L2
 };
+
+#if SAIL_ARCH_SM80_AIU
+struct cube_load_params {
+    // tensor_h
+    int32_t tensor_dims_y;
+    // tensor_w
+    int32_t tensor_dims_x;
+    // tensor_z
+    int32_t tensor_dims_z;
+    // y_offset
+    int32_t y_offset;
+    // x_offset
+    int32_t x_offset;
+    // z_offset, swizzle: usigned 15 bits; linear: signed 16 bits;
+    int32_t z_offset;
+    // cube_h
+    uint16_t cube_h;
+    // cube_w
+    uint16_t cube_w;
+    // cube_z
+    uint16_t cube_z;
+    // cube_n
+    uint16_t cube_n;
+
+    uint32_t channel_offset;
+    uint32_t start_coord_y;
+    uint32_t start_coord_x;
+
+    uint32_t slice_num;
+
+    cube_load_params ():slice_num(4), tensor_dims_y(0), tensor_dims_x(0), tensor_dims_z(0), y_offset(0), x_offset(0), z_offset(0), cube_h(0), cube_w(0), cube_z(0), cube_n(1), channel_offset(0),start_coord_y(0),start_coord_x(0)
+    {};
+
+
+    cube_load_params operator=(const cube_load_params &t)
+    {
+        tensor_dims_y= t.tensor_dims_y;
+        tensor_dims_x= t.tensor_dims_x;
+        tensor_dims_z= t.tensor_dims_z;
+        y_offset= t.y_offset;
+        x_offset= t.x_offset;
+        z_offset= t.z_offset;
+        cube_h= t.cube_h;
+        cube_w= t.cube_w;
+        cube_z= t.cube_z;
+        cube_n= t.cube_n;
+        return *this;
+    };
+};
+#endif
 
 #if (__CUDACC_VER_MAJOR__ >= 11)
 #if (!defined(__CUDA_ARCH__) || (__CUDA_ARCH__ >= 800))
@@ -84,6 +136,52 @@ __device__ __forceinline__ void load_128b(T* smem_ptr, const T* gmem_ptr) {
   *((uint4*)smem_ptr) = *((uint4*)gmem_ptr);
 #endif
 }
+
+#if SAIL_ARCH_SM80_AIU
+template <typename Dtype, bool trans, typename T>
+__device__ __forceinline__ void load_128b_aiu(T* smem_ptr, const T* gmem_ptr, cube_load_params* q_AIU_para) {
+#ifdef FLASHINFER_CP_ASYNC_ENABLED
+uint32_t smem_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
+if constexpr (trans){
+  if constexpr (sizeof(Dtype)==2) { 
+      asm volatile("ppu.cp.async.aiu.bulk.tensor.shared.global.trans.padz.swzl.2d.b16 [%0], [%1], "
+      "{%2, %3, %4, %5, %6, %7}, {%8, %9, %10, %11};\n"
+        :: "r"(smem_int_ptr), "l"(gmem_ptr), 
+          "r"(q_AIU_para->tensor_dims_y), "r"(q_AIU_para->tensor_dims_x), "r"(q_AIU_para->tensor_dims_z), 
+          "r"(q_AIU_para->y_offset), "r"(q_AIU_para->x_offset), "r"(q_AIU_para->z_offset),
+          "r"(q_AIU_para->cube_h), "r"(q_AIU_para->cube_w), "r"(q_AIU_para->cube_z), "r"(q_AIU_para->cube_n));
+  }else{
+    //b8 not support trans
+      asm volatile("ppu.cp.async.aiu.bulk.tensor.shared.global.padz.swzl.2d.b8 [%0], [%1], "
+      "{%2, %3, %4, %5, %6, %7}, {%8, %9, %10, %11};\n"
+        ::"r"(smem_int_ptr), "l"(gmem_ptr), 
+          "r"(q_AIU_para->tensor_dims_y), "r"(q_AIU_para->tensor_dims_x), "r"(q_AIU_para->tensor_dims_z), 
+          "r"(q_AIU_para->y_offset), "r"(q_AIU_para->x_offset), "r"(q_AIU_para->z_offset),
+          "r"(q_AIU_para->cube_h), "r"(q_AIU_para->cube_w), "r"(q_AIU_para->cube_z), "r"(q_AIU_para->cube_n));
+  }
+}else{
+  if constexpr (sizeof(Dtype)==2) { 
+      asm volatile("ppu.cp.async.aiu.bulk.tensor.shared.global.padz.swzl.2d.b16 [%0], [%1], "
+      "{%2, %3, %4, %5, %6, %7}, {%8, %9, %10, %11};\n"
+        :: "r"(smem_int_ptr), "l"(gmem_ptr), 
+          "r"(q_AIU_para->tensor_dims_y), "r"(q_AIU_para->tensor_dims_x), "r"(q_AIU_para->tensor_dims_z), 
+          "r"(q_AIU_para->y_offset), "r"(q_AIU_para->x_offset), "r"(q_AIU_para->z_offset),
+          "r"(q_AIU_para->cube_h), "r"(q_AIU_para->cube_w), "r"(q_AIU_para->cube_z), "r"(q_AIU_para->cube_n));
+  }else{
+      asm volatile("ppu.cp.async.aiu.bulk.tensor.shared.global.padz.swzl.2d.b8 [%0], [%1], "
+      "{%2, %3, %4, %5, %6, %7}, {%8, %9, %10, %11};\n"
+        ::"r"(smem_int_ptr), "l"(gmem_ptr), 
+          "r"(q_AIU_para->tensor_dims_y), "r"(q_AIU_para->tensor_dims_x), "r"(q_AIU_para->tensor_dims_z), 
+          "r"(q_AIU_para->y_offset), "r"(q_AIU_para->x_offset), "r"(q_AIU_para->z_offset),
+          "r"(q_AIU_para->cube_h), "r"(q_AIU_para->cube_w), "r"(q_AIU_para->cube_z), "r"(q_AIU_para->cube_n));
+  }
+}
+
+#else
+  *((uint4*)smem_ptr) = *((uint4*)gmem_ptr);
+#endif
+}
+#endif
 
 /*!
  * \brief Wrapper of PTX cp.async.cg.shared.global instruction, asynchronously copy data from

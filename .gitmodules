@@ -1,6 +1,7 @@
 [submodule "3rdparty/cutlass"]
 	path = 3rdparty/cutlass
-	url = https://github.com/NVIDIA/cutlass.git
+	url = https://ai-gerrit.eng.t-head.cn/a/AI/SW/Libraries/cutlass3.git
+	branch = v3.6.0_ppu_dev
 [submodule "3rdparty/spdlog"]
 	path = 3rdparty/spdlog
 	url = https://github.com/gabime/spdlog.git
