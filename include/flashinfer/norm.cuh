@@ -1872,6 +1872,315 @@ thread_id * VEC_SIZE);
 #endif
 }
 
+// FusedAddRMSNormPersistentKernel: persistent double-buffered RMS normalization.
+//
+// Designed for decode workloads (small batch_size, large d) where we want each
+// block to process multiple rows in a persistent grid fashion.
+//
+// Warp split:
+//   Main group  (ty < num_warps_main): compute x=inp+res, reduce, normalize
+//   Helper group (ty >= num_warps_main, NUM_HELPER_WARPS warps): cp.async prefetch +
+//                                                                  cross-warp reduce
+//
+// Shared memory layout:
+//   [float region, 16-byte aligned]
+//     smem_warp_sums[num_warps_main] : per-warp sum_sq for current row
+//     smem_rms_rcp[1]                : rms_rcp for current row
+//   [T region after alignment]
+//     smem_weight[d]                : weight row (prefetched once in prologue)
+//     smem_input_next[d]            : next row input  (double buffer)
+//     smem_residual_next[d]         : next row residual (double buffer)
+//
+// Execution flow:
+//   Prologue: helper prefetches weight + row 1 (next row); main processes row 0 from global
+//   Main loop: for each row, pipeline across 3 stages
+//     Stage 0: main warp-reduces current row; loads next row data from smem to regs
+//     Stage 1: helper warp 0 cross-reduces → rms_rcp; main computes x_next;
+//              helper warps 1-3 prefetch row+2*gridDim.x into smem double buffer
+//     Stage 2: main normalizes current row from smem_weight; swap cur←next
+template <uint32_t VEC_SIZE, typename T, uint32_t NUM_HELPER_WARPS = 4>
+__global__ void FusedAddRMSNormPersistentKernel(
+    T* __restrict__ input, T* __restrict__ residual, T* __restrict__ weight,
+    const uint32_t batch_size, const uint32_t d,
+    const uint32_t stride_input, const uint32_t stride_residual,
+    float weight_bias, float eps) {
+  const uint32_t tx = threadIdx.x, ty = threadIdx.y;
+  constexpr uint32_t warp_size = 32;
+  const uint32_t num_warps_total = blockDim.y;
+  const uint32_t num_warps_main = num_warps_total - NUM_HELPER_WARPS;
+  const bool is_helper = (ty >= num_warps_main);
+  const uint32_t helper_ty = ty - num_warps_main;
+  const uint32_t num_threads_main = num_warps_main * warp_size;
+  const uint32_t main_thread_id = tx + ty * warp_size;
+  const uint32_t helper_thread_id = tx + helper_ty * warp_size;
+  const uint32_t num_helper_threads = NUM_HELPER_WARPS * warp_size;
+
+  // rounds must be 1: each thread covers exactly one VEC_SIZE chunk
+  const uint32_t rounds = ceil_div(d, VEC_SIZE * num_threads_main);
+  constexpr uint32_t MAX_ROUNDS = 1;
+  assert(rounds <= MAX_ROUNDS);
+
+  // Shared memory layout
+  extern __shared__ char smem_raw[];
+  const uint32_t float_region_bytes = (num_warps_main + 1) * sizeof(float);
+  const uint32_t aligned_float_region = (float_region_bytes + 15u) & ~15u;
+  float* smem_warp_sums = reinterpret_cast<float*>(smem_raw);
+  float* smem_rms_rcp   = smem_warp_sums + num_warps_main;
+  T* smem_weight        = reinterpret_cast<T*>(smem_raw + aligned_float_region);
+  T* smem_input_next    = smem_weight + d;
+  T* smem_residual_next = smem_input_next + d;
+
+  constexpr uint32_t cp_size = VEC_SIZE * sizeof(T);
+
+  // Per-thread registers for current row (main group only)
+  float x_cur[VEC_SIZE];
+  float sum_sq = 0.f;
+  // Per-thread registers for next row (loaded from smem in Stage 0)
+  float x_next[VEC_SIZE];
+  float sum_sq_next = 0.f;
+
+  // vec index for this thread (used throughout; 1 round only)
+  const uint32_t vec_idx = main_thread_id * VEC_SIZE;
+  const bool valid = vec_idx < d;
+
+  // -------------------------------------------------------------------------
+  // PDL: wait for grid dependencies
+  // -------------------------------------------------------------------------
+#if (__CUDACC_VER_MAJOR__ >= 12 && defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+  asm volatile("griddepcontrol.wait;");
+#endif
+
+  // =========================================================================
+  // Prologue (executed once before the main loop)
+  // =========================================================================
+
+  // --- Prologue Step 1: Helper prefetches weight → smem_weight ---
+  if (is_helper) {
+    const uint32_t copy_rounds_w = ceil_div(d, VEC_SIZE * num_helper_threads);
+    for (uint32_t i = 0; i < copy_rounds_w; i++) {
+      const uint32_t e = (i * num_helper_threads + helper_thread_id) * VEC_SIZE;
+      if (e < d) {
+        if constexpr (cp_size == 16 || cp_size == 8 || cp_size == 4) {
+          uint32_t dst_addr = static_cast<uint32_t>(
+              __cvta_generic_to_shared(smem_weight + e));
+          const T* src_ptr = weight + e;
+          asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
+                       ::"r"(dst_addr), "l"(src_ptr), "n"(cp_size));
+        } else {
+          vec_t<T, VEC_SIZE> tmp;
+          tmp.fill(0.f);
+          tmp.load(weight + e);
+          tmp.store(smem_weight + e);
+        }
+      }
+    }
+  }
+
+  // --- Prologue Step 2: Main loads row 0 from global, computes x_cur, writes residual ---
+  if (!is_helper) {
+    vec_t<T, VEC_SIZE> inp_vec, res_vec;
+    inp_vec.fill(0.f);
+    res_vec.fill(0.f);
+    if (valid && blockIdx.x < batch_size) {
+      inp_vec.load(input    + blockIdx.x * stride_input    + vec_idx);
+      res_vec.load(residual + blockIdx.x * stride_residual + vec_idx);
+    }
+#pragma unroll
+    for (uint32_t j = 0; j < VEC_SIZE; j++) {
+      float xi = float(inp_vec[j]) + float(res_vec[j]);
+      x_cur[j]  = xi;
+      sum_sq   += xi * xi;
+      res_vec[j] = (T)xi;
+    }
+    if (valid && blockIdx.x < batch_size) {
+      res_vec.store(residual + blockIdx.x * stride_residual + vec_idx);
+    }
+  }
+
+  // --- Prologue Step 3: Helper prefetches row 1 (blockIdx.x + gridDim.x) → smem double buffer ---
+  if (is_helper) {
+    const uint32_t next_row = blockIdx.x + gridDim.x;
+    if (next_row < batch_size) {
+      const uint32_t copy_rounds_r = ceil_div(d, VEC_SIZE * num_helper_threads);
+      for (uint32_t i = 0; i < copy_rounds_r; i++) {
+        const uint32_t e = (i * num_helper_threads + helper_thread_id) * VEC_SIZE;
+        if (e < d) {
+          if constexpr (cp_size == 16 || cp_size == 8 || cp_size == 4) {
+            uint32_t dst_addr = static_cast<uint32_t>(
+                __cvta_generic_to_shared(smem_input_next + e));
+            const T* src_inp = input + next_row * stride_input + e;
+            asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
+                         ::"r"(dst_addr), "l"(src_inp), "n"(cp_size));
+            dst_addr = static_cast<uint32_t>(
+                __cvta_generic_to_shared(smem_residual_next + e));
+            const T* src_res = residual + next_row * stride_residual + e;
+            asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
+                         ::"r"(dst_addr), "l"(src_res), "n"(cp_size));
+          } else {
+            vec_t<T, VEC_SIZE> tmp;
+            tmp.fill(0.f);
+            tmp.load(input + next_row * stride_input + e);
+            tmp.store(smem_input_next + e);
+            tmp.fill(0.f);
+            tmp.load(residual + next_row * stride_residual + e);
+            tmp.store(smem_residual_next + e);
+          }
+        }
+      }
+    }
+    if constexpr (cp_size == 16 || cp_size == 8 || cp_size == 4) {
+      asm volatile("cp.async.commit_group;\n");
+      asm volatile("cp.async.wait_group 0;\n");
+    }
+  }
+  __syncthreads();  // Prologue complete: weight + row1 data visible to all threads
+
+  // =========================================================================
+  // Main loop: persistent, step = gridDim.x
+  // =========================================================================
+  for (uint32_t row = blockIdx.x; row < batch_size; row += gridDim.x) {
+    const bool has_next = (row + gridDim.x) < batch_size;
+    const bool has_next_next = (row + 2 * gridDim.x) < batch_size;
+
+    // -----------------------------------------------------------------
+    // Stage 0:
+    //   Main: warp-reduce sum_sq → smem_warp_sums[ty]
+    //         if has_next: load next row from smem → regs (inp_next_vec, res_next_vec)
+    //   Helper: idle
+    // -----------------------------------------------------------------
+    vec_t<T, VEC_SIZE> inp_next_vec, res_next_vec;
+    inp_next_vec.fill(0.f);
+    res_next_vec.fill(0.f);
+
+    if (!is_helper) {
+      // Warp-level butterfly reduce
+#pragma unroll
+      for (uint32_t offset = warp_size / 2; offset > 0; offset /= 2) {
+        sum_sq += math::shfl_xor_sync(sum_sq, offset);
+      }
+      if (tx == 0) {
+        smem_warp_sums[ty] = sum_sq;
+      }
+      // Load next row from smem double buffer to registers
+      if (has_next && valid) {
+        inp_next_vec.load(smem_input_next    + vec_idx);
+        res_next_vec.load(smem_residual_next + vec_idx);
+      }
+    }
+    __syncthreads();  // Stage 0 → Stage 1
+
+    // -----------------------------------------------------------------
+    // Stage 1:
+    //   Helper warp 0: cross-reduce smem_warp_sums → smem_rms_rcp[0]
+    //   Main: if has_next, compute x_next, sum_sq_next, writeback residual_next
+    //   Helper warps 1-3: if has_next_next, cp.async next-next row → smem double buffer
+    // -----------------------------------------------------------------
+    sum_sq_next = 0.f;
+    if (is_helper) {
+      if (helper_ty == 0) {
+        float val = (tx < num_warps_main) ? smem_warp_sums[tx] : 0.f;
+#pragma unroll
+        for (uint32_t offset = warp_size / 2; offset > 0; offset /= 2) {
+          val += math::shfl_xor_sync(val, offset);
+        }
+        if (tx == 0) {
+          smem_rms_rcp[0] = math::rsqrt(val / float(d) + eps);
+        }
+      } else {
+        // helper_ty >= 1: prefetch row + 2*gridDim.x
+        if (has_next_next) {
+          const uint32_t next_next_row = row + 2 * gridDim.x;
+          // This helper group has (NUM_HELPER_WARPS - 1) warps = 3 warps = 96 threads
+          const uint32_t num_prefetch_threads = (NUM_HELPER_WARPS - 1) * warp_size;
+          const uint32_t prefetch_thread_id   = tx + (helper_ty - 1) * warp_size;
+          const uint32_t copy_rounds_p = ceil_div(d, VEC_SIZE * num_prefetch_threads);
+          for (uint32_t i = 0; i < copy_rounds_p; i++) {
+            const uint32_t e = (i * num_prefetch_threads + prefetch_thread_id) * VEC_SIZE;
+            if (e < d) {
+              if constexpr (cp_size == 16 || cp_size == 8 || cp_size == 4) {
+                uint32_t dst_addr = static_cast<uint32_t>(
+                    __cvta_generic_to_shared(smem_input_next + e));
+                const T* src_inp = input + next_next_row * stride_input + e;
+                asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
+                             ::"r"(dst_addr), "l"(src_inp), "n"(cp_size));
+                dst_addr = static_cast<uint32_t>(
+                    __cvta_generic_to_shared(smem_residual_next + e));
+                const T* src_res = residual + next_next_row * stride_residual + e;
+                asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
+                             ::"r"(dst_addr), "l"(src_res), "n"(cp_size));
+              } else {
+                vec_t<T, VEC_SIZE> tmp;
+                tmp.fill(0.f);
+                tmp.load(input + next_next_row * stride_input + e);
+                tmp.store(smem_input_next + e);
+                tmp.fill(0.f);
+                tmp.load(residual + next_next_row * stride_residual + e);
+                tmp.store(smem_residual_next + e);
+              }
+            }
+          }
+        }
+        if constexpr (cp_size == 16 || cp_size == 8 || cp_size == 4) {
+          asm volatile("cp.async.commit_group;\n");
+          asm volatile("cp.async.wait_group 0;\n");
+        }
+      }
+    } else {
+      // Main: compute x_next, accumulate sum_sq_next, writeback residual_next
+      if (has_next) {
+#pragma unroll
+        for (uint32_t j = 0; j < VEC_SIZE; j++) {
+          float xi = float(inp_next_vec[j]) + float(res_next_vec[j]);
+          x_next[j]    = xi;
+          sum_sq_next += xi * xi;
+          res_next_vec[j] = (T)xi;
+        }
+        if (valid) {
+          res_next_vec.store(residual + (row + gridDim.x) * stride_residual + vec_idx);
+        }
+      }
+    }
+    __syncthreads();  // Stage 1 → Stage 2
+
+    // -----------------------------------------------------------------
+    // Stage 2:
+    //   Main: read smem_rms_rcp[0], load weight from smem_weight,
+    //         normalize x_cur, write to input[row]
+    //   Swap: x_cur ← x_next, sum_sq ← sum_sq_next
+    // -----------------------------------------------------------------
+    if (!is_helper) {
+      const float rms_rcp = smem_rms_rcp[0];
+      if (valid && row < batch_size) {
+        vec_t<T, VEC_SIZE> weight_vec, out_vec;
+        weight_vec.fill(0.f);
+        out_vec.fill(0.f);
+        weight_vec.load(smem_weight + vec_idx);
+#pragma unroll
+        for (uint32_t j = 0; j < VEC_SIZE; j++) {
+          out_vec[j] = x_cur[j] * rms_rcp * (weight_bias + float(weight_vec[j]));
+        }
+        out_vec.store(input + row * stride_input + vec_idx);
+      }
+      // Swap current ← next (for last iteration, this is a no-op logically)
+#pragma unroll
+      for (uint32_t j = 0; j < VEC_SIZE; j++) {
+        x_cur[j] = x_next[j];
+      }
+      sum_sq = sum_sq_next;
+    }
+    // No __syncthreads() needed here: next iteration's Stage 0 smem write
+    // (smem_warp_sums) happens before Stage 1 reads it, protected by the
+    // __syncthreads() at the end of Stage 0.
+  }  // end persistent loop
+
+  // =========================================================================
+  // PDL: signal dependents
+  // =========================================================================
+#if (__CUDACC_VER_MAJOR__ >= 12 && defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+  asm volatile("griddepcontrol.launch_dependents;");
+#endif
+}  // end FusedAddRMSNormPersistentKernel
+
 template <typename T>
 cudaError_t FusedAddRMSNorm(T* input, T* residual, T* weight, uint32_t batch_size, uint32_t d,
                             uint32_t stride_input, uint32_t stride_residual, float eps = 1e-5,
@@ -1906,7 +2215,7 @@ config.gridDim = nblks;
 
     // --- Persistent kernel path (highest priority) ---
     bool used_persistent = false;
-// d <= 7168
+    // d <= 7168
     if (num_warps + NUM_HELPER_WARPS <= 32 && rounds <= 1) {
       const uint32_t num_warps_total = num_warps + NUM_HELPER_WARPS;
       // Compute persistent kernel smem size:

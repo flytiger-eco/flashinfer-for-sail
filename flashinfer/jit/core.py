@@ -411,10 +411,9 @@ def gen_jit_spec(
     needs_device_linking: bool = False,
 ) -> JitSpec:
     check_cuda_arch()
-    # Use FLASHINFER_JIT_DEBUG if set, otherwise use FLASHINFER_JIT_VERBOSE (for backward compatibility)
-    debug_env = os.environ.get("FLASHINFER_JIT_DEBUG")
-    verbose_env = os.environ.get("FLASHINFER_JIT_VERBOSE", "0")
-    debug = (debug_env if debug_env is not None else verbose_env) == "1"
+    # FLASHINFER_JIT_DEBUG controls debug compilation flags (-O0, -G, etc.)
+    # FLASHINFER_JIT_VERBOSE only controls build output verbosity, not compilation flags
+    debug = os.environ.get("FLASHINFER_JIT_DEBUG", "0") == "1"
 
     # Only add default C++ standard if not specified in extra flags
     cflags_has_std = extra_cflags is not None and any(
@@ -436,6 +435,8 @@ def gen_jit_spec(
         "-DFLASHINFER_ENABLE_BF16",
         "-DFLASHINFER_ENABLE_FP8_E4M3",
         "-DFLASHINFER_ENABLE_FP8_E5M2",
+        "-mllvm",
+        "-ppu-max-vreg-count=64",
     ]
     if not cuda_cflags_has_std:
         cuda_cflags.insert(0, "-std=c++17")
@@ -463,13 +464,7 @@ def gen_jit_spec(
         cflags += extra_cflags
     if extra_cuda_cflags is not None:
         cuda_cflags += extra_cuda_cflags
-    if extra_include_paths is not None:
-        extra_include_paths = [Path(x) for x in extra_include_paths]
-    sources = [Path(x) for x in sources]
-    USE_SAIL = 'PPU_SDK' in os.environ.keys()
-    if USE_SAIL:
-        cflags.append("-DUSE_SAIL")
-        cuda_cflags.append("-DUSE_SAIL")
+
     spec = JitSpec(
         name=name,
         sources=[Path(x) for x in sources],
