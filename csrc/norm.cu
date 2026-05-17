@@ -118,6 +118,46 @@ void rmsnorm_quant(TensorView output, TensorView input, TensorView weight, Tenso
   }
 }
 
+void rmsnorm_online_quant(TensorView output, TensorView input, TensorView weight,
+                          TensorView output_scale, double eps, bool enable_pdl) {
+  CHECK_LAST_DIM_CONTIGUOUS_INPUT(input);
+  CHECK_LAST_DIM_CONTIGUOUS_INPUT(output);
+  CHECK_LAST_DIM_CONTIGUOUS_INPUT(weight);
+  CHECK_DEVICE(input, weight);
+  CHECK_DEVICE(input, output_scale);
+  CHECK_DIM(1, weight);  // weight: (hidden_size)
+  // output_scale: (batch_size,) float32
+
+  auto input_ndim = input.ndim();
+  if (input_ndim == 2) {
+    CHECK_DIM(2, output);
+    TVM_FFI_ICHECK_EQ(input.size(1), weight.size(0));
+    unsigned int batch_size = input.size(0);
+    unsigned int hidden_size = input.size(1);
+    TVM_FFI_ICHECK_EQ(output_scale.size(0), batch_size);
+
+    ffi::CUDADeviceGuard device_guard(input.device().device_id);
+    const cudaStream_t stream = get_stream(input.device());
+
+    DISPATCH_DLPACK_DTYPE_TO_CTYPE_FP16(input.dtype(), c_type, [&] {
+      return DISPATCH_DLPACK_DTYPE_TO_CTYPE_FP8(output.dtype(), o_type, [&] {
+        cudaError_t status = norm::RMSNormOnlineQuant(
+            static_cast<c_type*>(input.data_ptr()),
+            static_cast<c_type*>(weight.data_ptr()),
+            static_cast<o_type*>(output.data_ptr()),
+            static_cast<float*>(output_scale.data_ptr()),
+            batch_size, hidden_size, input.stride(0),
+            output.stride(0), eps, enable_pdl, stream);
+        TVM_FFI_ICHECK(status == cudaSuccess)
+            << "RMSNormOnlineQuant failed with error code " << cudaGetErrorString(status);
+        return true;
+      });
+    });
+  } else {
+    TVM_FFI_ICHECK(false) << "Unsupported input dimension: " << input_ndim;
+  }
+}
+
 void fused_add_rmsnorm(TensorView input, TensorView residual, TensorView weight, double eps,
                        bool enable_pdl) {
   CHECK_LAST_DIM_CONTIGUOUS_INPUT(input);

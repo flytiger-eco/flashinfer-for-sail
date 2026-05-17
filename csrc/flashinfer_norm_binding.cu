@@ -20,6 +20,9 @@ void rmsnorm(TensorView out, TensorView input, TensorView weight, double eps, bo
 void rmsnorm_quant(TensorView out, TensorView input, TensorView weight, TensorView scale,
                    double eps, bool enable_pdl);
 
+void rmsnorm_online_quant(TensorView output, TensorView input, TensorView weight,
+                          TensorView output_scale, double eps, bool enable_pdl);
+
 void fused_add_rmsnorm(TensorView input, TensorView residual, TensorView weight, double eps,
                        bool enable_pdl);
 
@@ -53,6 +56,7 @@ void fused_qk_rmsnorm_rope_run(TensorView qkv_in, TensorView q_weight, TensorVie
 
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(rmsnorm, rmsnorm);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(rmsnorm_quant, rmsnorm_quant);
+TVM_FFI_DLL_EXPORT_TYPED_FUNC(rmsnorm_online_quant, rmsnorm_online_quant);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(fused_add_rmsnorm, fused_add_rmsnorm);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(fused_add_rmsnorm_quant, fused_add_rmsnorm_quant);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(gemma_rmsnorm, gemma_rmsnorm);

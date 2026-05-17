@@ -98,6 +98,33 @@ def fused_add_rms_norm_quant(x, residual, weight, scale, eps):
     x = x.to(torch.float8_e4m3fn)
     return x, residual
 
+def llama_rms_norm_online_quant(x, w, eps=1e-6):
+    """RMSNorm + per-token online FP8 quantization.
+
+    Returns:
+        output: FP8 quantized tensor
+        scale: per-token scale (float32), shape (batch_size,)
+    """
+    FP8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max  # 448.0
+
+    # Step 1: RMSNorm
+    x_float = x.float()
+    variance = x_float.pow(2).mean(dim=-1, keepdim=True)
+    x_norm = x_float * torch.rsqrt(variance + eps)
+    x_norm = x_norm * w.float()
+
+    # Step 2: per-token absmax -> scale
+    max_abs = x_norm.abs().amax(dim=-1)  # (batch_size,)
+    scale = max_abs / FP8_E4M3_MAX       # (batch_size,)
+
+    # Step 3: quantize
+    scale_inv = torch.where(max_abs > 0, FP8_E4M3_MAX / max_abs, torch.zeros_like(max_abs))
+    x_quant = x_norm * scale_inv.unsqueeze(-1)
+    x_quant = torch.clamp(x_quant, -FP8_E4M3_MAX, FP8_E4M3_MAX)
+    x_quant = x_quant.to(torch.float8_e4m3fn)
+
+    return x_quant, scale
+
 
 @pytest.mark.parametrize("batch_size", [1, 19, 99, 989])
 @pytest.mark.parametrize("hidden_size", [111, 500, 1024, 3072, 3584, 4096, 8192, 16384])
@@ -154,6 +181,60 @@ def test_norm_quant(
     )
 
     torch.testing.assert_close(y_ref.float(), y.float(), rtol=1, atol=1)
+
+@pytest.mark.parametrize("batch_size", [8192])
+@pytest.mark.parametrize("hidden_size", [4096])
+@pytest.mark.parametrize("dtype", [torch.float16])
+@pytest.mark.parametrize("enable_pdl", [False])
+@pytest.mark.parametrize("contiguous", [True])
+def test_norm_online_quant(batch_size, hidden_size, dtype, enable_pdl, contiguous):
+    if contiguous:
+        x = torch.randn(batch_size, hidden_size).to(0).to(dtype)
+    else:
+        x = torch.randn(batch_size, hidden_size * 2, device="cuda").to(dtype)
+        x = x[:, :hidden_size]
+
+    if enable_pdl and not device_support_pdl(x.device):
+        pytest.skip("PDL is only available for Hopper and later GPUs")
+
+    w = torch.randn(hidden_size).to(0).to(dtype)
+
+    # 1. Run kernel, get y_fp8 and output_scale
+    y = torch.empty(batch_size, hidden_size, dtype=torch.float8_e4m3fn, device="cuda")
+    output_scale = torch.empty(batch_size, dtype=torch.float32, device="cuda")
+    flashinfer.norm.rmsnorm_online_quant(
+        y, x, w, output_scale, enable_pdl=enable_pdl
+    )
+
+    # 2. Compute RMSNorm reference in float32
+    x_float = x.float()
+    variance = x_float.pow(2).mean(dim=-1, keepdim=True)
+    y_ref_float = x_float * torch.rsqrt(variance + 1e-6) * w.float()
+
+    # 3. Cross-validation (DeepGEMM style): use kernel's output_scale to quantize
+    #    the reference. This eliminates scale discrepancy and only verifies that
+    #    given the same scale, the kernel's quantization result is correct.
+    FP8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
+    scale_inv = torch.where(
+        output_scale > 0,
+        FP8_E4M3_MAX / output_scale,
+        torch.zeros_like(output_scale),
+    )
+    y_ref_scaled = y_ref_float * scale_inv.unsqueeze(-1)
+    y_ref_scaled = torch.clamp(y_ref_scaled, -FP8_E4M3_MAX, FP8_E4M3_MAX)
+    y_ref_fp8 = y_ref_scaled.to(torch.float8_e4m3fn)
+
+    # 4. Compare FP8 values directly (with same scale, difference only comes from
+    #    fp16/bf16 vs fp32 RMSNorm precision gap)
+    torch.testing.assert_close(y.float(), y_ref_fp8.float(), rtol=1, atol=1)
+
+    # 5. End-to-end verification: dequantize and compare against float reference
+    y_dequant = y.float() * output_scale.unsqueeze(-1)
+    torch.testing.assert_close(y_dequant, y_ref_float, rtol=0.1, atol=0.1)
+
+    # 6. output_scale sanity checks
+    assert (output_scale >= 0).all()
+    assert output_scale.isfinite().all()
 
 
 @pytest.mark.parametrize("batch_size", [1, 19, 99, 989])

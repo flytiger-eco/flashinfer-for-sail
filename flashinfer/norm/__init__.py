@@ -41,6 +41,7 @@ from ..trace.templates.norm import (
     layernorm_trace,
     rmsnorm_quant_trace,
     rmsnorm_trace,
+    rmsnorm_online_quant_trace,
 )
 from ..utils import (
     backend_requirement,
@@ -229,6 +230,57 @@ def _rmsnorm_quant_fake(
     input: torch.Tensor,
     weight: torch.Tensor,
     scale: torch.Tensor,
+    eps: float,
+    enable_pdl: Optional[bool],
+) -> None:
+    pass
+
+
+@flashinfer_api(trace=rmsnorm_online_quant_trace)
+@register_custom_op("flashinfer::rmsnorm_online_quant", mutates_args=("out", "output_scale"))
+def rmsnorm_online_quant(
+    out: torch.Tensor,
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    output_scale: torch.Tensor,
+    eps: float = 1e-6,
+    enable_pdl: Optional[bool] = None,
+) -> None:
+    r"""Root mean square normalization + per-token online fp8 quantization.
+
+    Computes RMSNorm, dynamically computes per-token absmax to derive quantization scale,
+    and quantizes output to FP8.
+
+    ``out[i] = clamp(RMSNorm(input[i]) * weight / scale[i], -448, 448).to(fp8)``
+    ``output_scale[i] = max(|RMSNorm(input[i]) * weight|) / 448``
+
+    Parameters
+    ----------
+    out: torch.Tensor
+        The output tensor (fp8), shape (batch_size, hidden_size).
+    input: torch.Tensor
+        Input tensor, shape (batch_size, hidden_size).
+    weight: torch.Tensor
+        Weight tensor, shape (hidden_size,).
+    output_scale: torch.Tensor
+        Per-token quantization scale output, shape (batch_size,), dtype float32.
+    eps: float
+        Epsilon for numerical stability.
+    enable_pdl: bool
+        Whether to enable `programmatic dependent launch
+        <https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#programmatic-dependent-launch-and-synchronization>`_
+    """
+    if enable_pdl is None:
+        enable_pdl = device_support_pdl(input.device)
+    get_norm_module().rmsnorm_online_quant(out, input, weight, output_scale, eps, enable_pdl)
+
+
+@register_fake_op("flashinfer::rmsnorm_online_quant")
+def _rmsnorm_online_quant_fake(
+    out: torch.Tensor,
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    output_scale: torch.Tensor,
     eps: float,
     enable_pdl: Optional[bool],
 ) -> None:
@@ -1736,6 +1788,7 @@ __all__ = [
     # Public APIs
     "rmsnorm",
     "rmsnorm_quant",
+    "rmsnorm_online_quant",
     "fused_add_rmsnorm",
     "fused_add_rmsnorm_quant",
     "gemma_rmsnorm",

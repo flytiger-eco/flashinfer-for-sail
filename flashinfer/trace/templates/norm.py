@@ -73,6 +73,91 @@ rmsnorm_trace = TraceTemplate(
     init=_rmsnorm_init,
 )
 
+# ── RMSNormOnlineQuant ───────────────────────────────────────────────────────────────────
+
+@torch.no_grad()
+def _rmsnorm_online_quant_reference(hidden_states, weight):
+    """RMSNorm + per-token online FP8 quantization.
+
+    ``output_scale[i] = max(|RMSNorm(input[i]) * weight|) / 448``
+    ``out[i] = clamp(RMSNorm(input[i]) * weight / output_scale[i], -448, 448).to(fp8)``
+    """
+    EPS = 1e-6
+    FP8_MAX = torch.finfo(torch.float8_e4m3fn).max  # 448
+    x = hidden_states.to(torch.float32)
+    inv_rms = torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + EPS)
+    y = (x * inv_rms) * weight.to(torch.float32)
+    output_scale = y.abs().amax(dim=-1) / FP8_MAX
+    scale_inv = torch.where(
+        output_scale > 0,
+        FP8_MAX / output_scale,
+        torch.zeros_like(output_scale),
+    )
+    out = (y * scale_inv.unsqueeze(-1)).clamp(-FP8_MAX, FP8_MAX).to(torch.float8_e4m3fn)
+    return out, output_scale
+
+
+def _rmsnorm_online_quant_init(
+    *,
+    batch_size: int,
+    hidden_size: int = 4096,
+    device: str = "cuda",
+    seed: int = 0,
+):
+    """Build inputs for ``flashinfer.rmsnorm_online_quant``.
+
+    Sourced from ``tests/utils/test_norm.py::test_norm_online_quant`` (contiguous path):
+    ``input ~ randn(batch_size, hidden_size)``, ``weight ~ randn(hidden_size)``.
+    Default ``hidden_size=4096`` matches Llama-3.1-8B.
+    """
+    torch.manual_seed(seed)
+    out = torch.empty(
+        batch_size, hidden_size, dtype=torch.float8_e4m3fn, device=device
+    )
+    output_scale = torch.empty(batch_size, dtype=torch.float32, device=device)
+    return {
+        "out": out,
+        "input": torch.randn(
+            batch_size, hidden_size, dtype=torch.bfloat16, device=device
+        ),
+        "weight": torch.randn(hidden_size, dtype=torch.bfloat16, device=device),
+        "output_scale": output_scale,
+    }
+
+
+rmsnorm_online_quant_trace = TraceTemplate(
+    op_type="rmsnorm_online_quant",
+    name_prefix="rmsnorm_online_quant",
+    description=(
+        "RMSNorm + per-token online FP8 quantization. "
+        "Dynamically computes per-token absmax to derive quantization scale."
+    ),
+    axes={
+        "batch_size": Var(),
+        "hidden_size": Const(abbrev="h"),
+    },
+    inputs={
+        "hidden_states": Tensor(["batch_size", "hidden_size"], param="input"),
+        "weight": Tensor(["hidden_size"]),
+    },
+    outputs={
+        "out": Tensor(
+            ["batch_size", "hidden_size"],
+            dtype="float8_e4m3fn",
+            description="Quantized FP8 output.",
+        ),
+        "output_scale": Tensor(
+            ["batch_size"],
+            dtype="float32",
+            description="Per-token quantization scale: max(|y|) / 448.",
+        ),
+    },
+    tags=["status:verified", "quantization:fp8"],
+    reference=_rmsnorm_online_quant_reference,
+    init=_rmsnorm_online_quant_init,
+)
+
+
 # ── Fused Add + RMSNorm ───────────────────────────────────────────────────────
 
 
