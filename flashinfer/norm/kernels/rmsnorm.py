@@ -24,6 +24,7 @@ Includes:
 
 import functools
 import math
+from typing import Optional
 
 import cutlass
 import cutlass.cute as cute

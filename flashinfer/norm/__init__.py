@@ -114,21 +114,26 @@ def _normalize_scale_tensor(
 @flashinfer_api(trace=rmsnorm_trace)
 def rmsnorm(
     input: torch.Tensor,
-    weight: torch.Tensor,
+    weight: Optional[torch.Tensor] = None,
     eps: float = 1e-6,
     out: Optional[torch.Tensor] = None,
     enable_pdl: Optional[bool] = None,
 ) -> torch.Tensor:
     r"""Root mean square normalization.
 
+    When weight is provided:
     ``out[i] = (input[i] / RMS(input)) * weight[i]``
+
+    When weight is None (normalization only):
+    ``out[i] = input[i] / RMS(input)``
 
     Parameters
     ----------
     input: torch.Tensor
         Input tensor, 2D shape (batch_size, hidden_size) or 3D shape (batch_size, num_heads, hidden_size).
-    weight: torch.Tensor
-        Weight tensor, shape (hidden_size,).
+    weight: Optional[torch.Tensor]
+        Weight tensor, shape (hidden_size,). If None, only normalization is applied without
+        scaling by weight.
     eps: float
         Epsilon for numerical stability.
     out: Optional[torch.Tensor]
@@ -152,15 +157,22 @@ def rmsnorm(
 def _rmsnorm_impl(
     out: torch.Tensor,
     input: torch.Tensor,
-    weight: torch.Tensor,
+    weight: Optional[torch.Tensor],
     eps: float,
     enable_pdl: Optional[bool],
 ) -> None:
-    if enable_pdl is None or enable_pdl:
+    if enable_pdl is None:
         enable_pdl = device_support_pdl(input.device)
     if _USE_CUDA_NORM:
+        # C++ binding accepts Optional<TensorView>; pass weight (possibly None)
+        # directly so the CUDA kernel can take its weight=nullptr fast path.
         get_norm_module().rmsnorm(out, input, weight, eps, enable_pdl)
     else:
+        # CuTe DSL kernels do not handle a missing weight, fall back to ones.
+        if weight is None:
+            weight = torch.ones(
+                input.shape[-1], dtype=input.dtype, device=input.device
+            )
         if input.dim() == 3:
             qk_rmsnorm_cute(
                 input, weight, out, eps, weight_bias=0.0, enable_pdl=enable_pdl
@@ -171,15 +183,6 @@ def _rmsnorm_impl(
             )
 
 
-@register_fake_op("flashinfer::rmsnorm")
-def _rmsnorm_impl_fake(
-    out: torch.Tensor,
-    input: torch.Tensor,
-    weight: torch.Tensor,
-    eps: float,
-    enable_pdl: Optional[bool],
-) -> None:
-    pass
 
 
 @flashinfer_api(trace=rmsnorm_quant_trace)

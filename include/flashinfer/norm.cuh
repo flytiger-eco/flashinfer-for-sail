@@ -33,7 +33,7 @@ namespace norm {
 
 using namespace tensorrt_llm::common;
 
-template <uint32_t VEC_SIZE, typename T>
+template <uint32_t VEC_SIZE, typename T, bool HAS_WEIGHT = true>
 __global__ void RMSNormKernel(T* __restrict__ input, T* __restrict__ weight, T* __restrict__ output,
                               const uint32_t d, const uint32_t stride_input,
                               const uint32_t stride_output, float weight_bias, float eps) {
@@ -94,11 +94,20 @@ __global__ void RMSNormKernel(T* __restrict__ input, T* __restrict__ weight, T* 
     weight_vec.fill(0.f);
     if ((i * num_threads + thread_id) * VEC_SIZE < d) {
       input_vec.load(input + bx * stride_input + i * num_threads * VEC_SIZE + thread_id * VEC_SIZE);
-      weight_vec.load(weight + i * num_threads * VEC_SIZE + thread_id * VEC_SIZE);
+      if constexpr (HAS_WEIGHT) {
+        weight_vec.load(weight + i * num_threads * VEC_SIZE + thread_id * VEC_SIZE);
+      }
     }
+    if constexpr (HAS_WEIGHT) {
 #pragma unroll
-    for (uint32_t j = 0; j < VEC_SIZE; j++) {
-      output_vec[j] = float(input_vec[j]) * rms_rcp * (weight_bias + float(weight_vec[j]));
+      for (uint32_t j = 0; j < VEC_SIZE; j++) {
+        output_vec[j] = float(input_vec[j]) * rms_rcp * (weight_bias + float(weight_vec[j]));
+      }
+    } else {
+#pragma unroll
+      for (uint32_t j = 0; j < VEC_SIZE; j++) {
+        output_vec[j] = float(input_vec[j]) * rms_rcp;
+      }
     }
     if ((i * num_threads + thread_id) * VEC_SIZE < d) {
       output_vec.store(output + bx * stride_output + i * num_threads * VEC_SIZE +
@@ -138,7 +147,8 @@ __global__ void RMSNormKernel(T* __restrict__ input, T* __restrict__ weight, T* 
 //              [DEFER_WAIT=false]: commit + wait_group 0 together
 //              [DEFER_WAIT=true]: commit only, wait deferred to next Stage 0
 //     Stage 2: main normalizes current row using smem_weight → output; swap cur←next
-template <uint32_t VEC_SIZE, typename T, uint32_t NUM_HELPER_WARPS = 4, bool DEFER_WAIT = false>
+template <uint32_t VEC_SIZE, typename T, uint32_t NUM_HELPER_WARPS = 4, bool DEFER_WAIT = false,
+          bool HAS_WEIGHT = true>
 __global__ void RMSNormPersistentKernel(
     T* __restrict__ input, T* __restrict__ weight, T* __restrict__ output,
     const uint32_t batch_size, const uint32_t d,
@@ -194,22 +204,25 @@ __global__ void RMSNormPersistentKernel(
   // =========================================================================
 
   // --- Prologue Step 1: Helper prefetches weight → smem_weight ---
-  if (is_helper) {
-    const uint32_t copy_rounds_w = ceil_div(d, VEC_SIZE * num_helper_threads);
-    for (uint32_t i = 0; i < copy_rounds_w; i++) {
-      const uint32_t e = (i * num_helper_threads + helper_thread_id) * VEC_SIZE;
-      if (e < d) {
-        if constexpr (cp_size == 16 || cp_size == 8 || cp_size == 4) {
-          uint32_t dst_addr = static_cast<uint32_t>(
-              __cvta_generic_to_shared(smem_weight + e));
-          const T* src_ptr = weight + e;
-          asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
-                       ::"r"(dst_addr), "l"(src_ptr), "n"(cp_size));
-        } else {
-          vec_t<T, VEC_SIZE> tmp;
-          tmp.fill(0.f);
-          tmp.load(weight + e);
-          tmp.store(smem_weight + e);
+  // Skip prefetch if weight is nullptr; smem layout is preserved.
+  if constexpr (HAS_WEIGHT) {
+    if (is_helper) {
+      const uint32_t copy_rounds_w = ceil_div(d, VEC_SIZE * num_helper_threads);
+      for (uint32_t i = 0; i < copy_rounds_w; i++) {
+        const uint32_t e = (i * num_helper_threads + helper_thread_id) * VEC_SIZE;
+        if (e < d) {
+          if constexpr (cp_size == 16 || cp_size == 8 || cp_size == 4) {
+            uint32_t dst_addr = static_cast<uint32_t>(
+                __cvta_generic_to_shared(smem_weight + e));
+            const T* src_ptr = weight + e;
+            asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
+                         ::"r"(dst_addr), "l"(src_ptr), "n"(cp_size));
+          } else {
+            vec_t<T, VEC_SIZE> tmp;
+            tmp.fill(0.f);
+            tmp.load(weight + e);
+            tmp.store(smem_weight + e);
+          }
         }
       }
     }
@@ -373,10 +386,17 @@ __global__ void RMSNormPersistentKernel(
         vec_t<T, VEC_SIZE> weight_vec, out_vec;
         weight_vec.fill(0.f);
         out_vec.fill(0.f);
-        weight_vec.load(smem_weight + vec_idx);
+        if constexpr (HAS_WEIGHT) {
+          weight_vec.load(smem_weight + vec_idx);
 #pragma unroll
-        for (uint32_t j = 0; j < VEC_SIZE; j++) {
-          out_vec[j] = x_cur[j] * rms_rcp * (weight_bias + float(weight_vec[j]));
+          for (uint32_t j = 0; j < VEC_SIZE; j++) {
+            out_vec[j] = x_cur[j] * rms_rcp * (weight_bias + float(weight_vec[j]));
+          }
+        } else {
+#pragma unroll
+          for (uint32_t j = 0; j < VEC_SIZE; j++) {
+            out_vec[j] = x_cur[j] * rms_rcp;
+          }
         }
         out_vec.store(output + row * stride_output + vec_idx);
       }
@@ -445,7 +465,7 @@ cudaError_t RMSNorm(T* input, T* weight, T* output, uint32_t batch_size, uint32_
           aligned_float_region + 2u * d * static_cast<uint32_t>(sizeof(T));
 
       auto persistent_kernel_fn =
-          RMSNormPersistentKernel<VEC_SIZE, T, NUM_HELPER_WARPS, false>;
+          RMSNormPersistentKernel<VEC_SIZE, T, NUM_HELPER_WARPS, false, true>;
 
       int num_blocks_per_sm = 0, num_sms = 0, dev_id = 0;
       // cudaFuncSetAttribute must come before cudaOccupancyMaxActiveBlocksPerMultiprocessor
@@ -472,18 +492,41 @@ cudaError_t RMSNorm(T* input, T* weight, T* output, uint32_t batch_size, uint32_
 
         if (batch_size > 2 * num_persistent_blocks) {
           // Large bs: defer wait to next iteration for better overlap
-          auto kernel_fn = RMSNormPersistentKernel<VEC_SIZE, T, NUM_HELPER_WARPS, true>;
-          FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(kernel_fn,
-                                                   cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                                   persistent_smem_size));
-          FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel_fn, input, weight,
-                                                 output, batch_size, d, stride_input,
-                                                 stride_output, weight_bias, eps));
+          if (weight != nullptr) {
+            auto kernel_fn =
+                RMSNormPersistentKernel<VEC_SIZE, T, NUM_HELPER_WARPS, true, true>;
+            FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(kernel_fn,
+                                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                                     persistent_smem_size));
+            FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel_fn, input, weight,
+                                                   output, batch_size, d, stride_input,
+                                                   stride_output, weight_bias, eps));
+          } else {
+            auto kernel_fn =
+                RMSNormPersistentKernel<VEC_SIZE, T, NUM_HELPER_WARPS, true, false>;
+            FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(kernel_fn,
+                                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                                     persistent_smem_size));
+            FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel_fn, input, weight,
+                                                   output, batch_size, d, stride_input,
+                                                   stride_output, weight_bias, eps));
+          }
         } else {
           // Small bs: commit + wait together in Stage 1
-          FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, persistent_kernel_fn, input, weight,
-                                                 output, batch_size, d, stride_input,
-                                                 stride_output, weight_bias, eps));
+          if (weight != nullptr) {
+            FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, persistent_kernel_fn, input, weight,
+                                                   output, batch_size, d, stride_input,
+                                                   stride_output, weight_bias, eps));
+          } else {
+            auto kernel_fn =
+                RMSNormPersistentKernel<VEC_SIZE, T, NUM_HELPER_WARPS, false, false>;
+            FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(kernel_fn,
+                                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                                     persistent_smem_size));
+            FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel_fn, input, weight,
+                                                   output, batch_size, d, stride_input,
+                                                   stride_output, weight_bias, eps));
+          }
         }
         used_persistent = true;
       }
@@ -498,11 +541,19 @@ cudaError_t RMSNorm(T* input, T* weight, T* output, uint32_t batch_size, uint32_
       config.blockDim = nthrs;
       config.dynamicSmemBytes = smem_size;
 
-      auto kernel = RMSNormKernel<VEC_SIZE, T>;
-      FLASHINFER_CUDA_CALL(
-          cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
-      FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel, input, weight, output, d,
-                                              stride_input, stride_output, weight_bias, eps));
+      if (weight != nullptr) {
+        auto kernel_fn = RMSNormKernel<VEC_SIZE, T, true>;
+        FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(
+            kernel_fn, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+        FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel_fn, input, weight, output, d,
+                                                stride_input, stride_output, weight_bias, eps));
+      } else {
+        auto kernel_fn = RMSNormKernel<VEC_SIZE, T, false>;
+        FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(
+            kernel_fn, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+        FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel_fn, input, weight, output, d,
+                                                stride_input, stride_output, weight_bias, eps));
+      }
     }
   });
   return cudaSuccess;
@@ -1185,7 +1236,7 @@ cudaError_t RMSNormQuant(T* input, T* weight, O* output, uint32_t batch_size, ui
   return cudaSuccess;
 }
 
-template <uint32_t VEC_SIZE, typename T>
+template <uint32_t VEC_SIZE, typename T, bool HAS_WEIGHT = true>
 __global__ void QKRMSNormKernel(T* __restrict__ input, T* __restrict__ weight,
                                 T* __restrict__ output, const uint32_t d, const uint32_t batch_size,
                                 const uint32_t num_heads, const uint32_t stride_input_n,
@@ -1195,7 +1246,7 @@ __global__ void QKRMSNormKernel(T* __restrict__ input, T* __restrict__ weight,
   const uint32_t num_workers = num_blks * num_warps;  // unroll on warp-dim
   const uint32_t num_jobs = batch_size * num_heads;
 
-  const uint32_t bx = blockIdx.x;
+    const uint32_t bx = blockIdx.x;
   const uint32_t tx = threadIdx.x, ty = threadIdx.y;
   const uint32_t worker_idx = bx * num_warps + ty;
 
@@ -1217,25 +1268,25 @@ __global__ void QKRMSNormKernel(T* __restrict__ input, T* __restrict__ weight,
     const uint32_t head_idx = job_idx % num_heads;
 
     for (uint32_t i = 0; i < rounds; i++) {
-      vec_t<T, VEC_SIZE> input_vec;
-      input_vec.fill(0.f);
-      if ((i * num_threads + thread_id) * VEC_SIZE < d) {
-        input_vec.load(input + batch_idx * stride_input_n + head_idx * stride_input_h +
+    vec_t<T, VEC_SIZE> input_vec;
+    input_vec.fill(0.f);
+    if ((i * num_threads + thread_id) * VEC_SIZE < d) {
+      input_vec.load(input + batch_idx * stride_input_n + head_idx * stride_input_h +
                        i * num_threads * VEC_SIZE + thread_id * VEC_SIZE);
-      }
+    }
 #pragma unroll
-      for (uint32_t j = 0; j < VEC_SIZE; j++) {
-        sum_sq += float(input_vec[j]) * float(input_vec[j]);
+    for (uint32_t j = 0; j < VEC_SIZE; j++) {
+            sum_sq += float(input_vec[j]) * float(input_vec[j]);
       }
     }
 
     // only have warp reduce sum
     // no need for __syncwarps as shfl already sync
 #pragma unroll
-    for (uint32_t offset = warp_size / 2; offset > 0; offset /= 2) {
-      sum_sq += math::shfl_xor_sync(sum_sq, offset);
-    }
-
+      for (uint32_t offset = warp_size / 2; offset > 0; offset /= 2) {
+        sum_sq += math::shfl_xor_sync(sum_sq, offset);
+      }
+      
     float rms_rcp = math::rsqrt(sum_sq / float(d) + eps);
 
     for (uint32_t i = 0; i < rounds; i++) {
@@ -1245,17 +1296,26 @@ __global__ void QKRMSNormKernel(T* __restrict__ input, T* __restrict__ weight,
       input_vec.fill(0.f);
       weight_vec.fill(0.f);
       if ((i * num_threads + thread_id) * VEC_SIZE < d) {
-        input_vec.load(input + batch_idx * stride_input_n + head_idx * stride_input_h +
+            input_vec.load(input + batch_idx * stride_input_n + head_idx * stride_input_h +
                        i * num_threads * VEC_SIZE + thread_id * VEC_SIZE);
-        weight_vec.load(weight + i * num_threads * VEC_SIZE + thread_id * VEC_SIZE);
+        if constexpr (HAS_WEIGHT) {
+          weight_vec.load(weight + i * num_threads * VEC_SIZE + thread_id * VEC_SIZE);
+        }
       }
+        if constexpr (HAS_WEIGHT) {
+          #pragma unroll
+          for (uint32_t j = 0; j < VEC_SIZE; j++) {
+            output_vec[j] = float(input_vec[j]) * rms_rcp * (weight_bias + float(weight_vec[j]));
+          }
+        } else {
 #pragma unroll
-      for (uint32_t j = 0; j < VEC_SIZE; j++) {
-        output_vec[j] = float(input_vec[j]) * rms_rcp * (weight_bias + float(weight_vec[j]));
-      }
-      if ((i * num_threads + thread_id) * VEC_SIZE < d) {
+          for (uint32_t j = 0; j < VEC_SIZE; j++) {
+            output_vec[j] = float(input_vec[j]) * rms_rcp;
+          }
+        }
+if ((i * num_threads + thread_id) * VEC_SIZE < d) {
         output_vec.store(output + batch_idx * stride_output_n + head_idx * stride_output_h +
-                         i * num_threads * VEC_SIZE + thread_id * VEC_SIZE);
+                      i * num_threads * VEC_SIZE + thread_id * VEC_SIZE);
       }
     }
   }
@@ -1263,6 +1323,303 @@ __global__ void QKRMSNormKernel(T* __restrict__ input, T* __restrict__ weight,
   asm volatile("griddepcontrol.launch_dependents;");
 #endif
 }
+// QKRMSNormPersistentKernel:
+//   Multi-head parallel persistent variant of QKRMSNormKernel for 3D
+//   (batch, num_heads, d) input/output layout with separate strides per-batch
+//   and per-head.
+//
+//   Design:
+//     - Each main warp ty in [0, NUM_HEADS_PER_ITER) independently processes
+//       one head per iteration: tx is the vec index, the warp reduces sum_sq
+//       in-register via shfl_xor, eliminating the cross-warp reduction.
+//     - Helper warps (NUM_HELPER_WARPS) cooperatively prefetch a batch of
+//       NUM_HEADS_PER_ITER heads into shared memory using a flat index.
+//     - Each block consumes NUM_HEADS_PER_ITER rows per iteration; grid stride
+//       is gridDim.x * NUM_HEADS_PER_ITER.
+//
+//   num_jobs = batch_size * num_heads. Each row index decomposes as
+//     batch_idx = row / num_heads
+//     head_idx  = row % num_heads
+//   and is mapped to addresses:
+//     input  + batch_idx * stride_input_n  + head_idx * stride_input_h  + offset
+//     output + batch_idx * stride_output_n + head_idx * stride_output_h + offset
+template <uint32_t VEC_SIZE, typename T, uint32_t NUM_HEADS_PER_ITER,
+          uint32_t NUM_HELPER_WARPS = 4, bool DEFER_WAIT = false, bool HAS_WEIGHT = true>
+__global__ void QKRMSNormPersistentKernel(
+    T* __restrict__ input, T* __restrict__ weight, T* __restrict__ output,
+    const uint32_t d, const uint32_t batch_size, const uint32_t num_heads,
+    const uint32_t stride_input_n, const uint32_t stride_input_h,
+    const uint32_t stride_output_n, const uint32_t stride_output_h,
+    float weight_bias, float eps) {
+  const uint32_t tx = threadIdx.x, ty = threadIdx.y;
+  constexpr uint32_t warp_size = 32;
+  const bool is_helper = (ty >= NUM_HEADS_PER_ITER);
+  const uint32_t helper_ty = ty - NUM_HEADS_PER_ITER;
+  const uint32_t helper_thread_id = tx + helper_ty * warp_size;
+  const uint32_t num_helper_threads = NUM_HELPER_WARPS * warp_size;
+
+  const uint32_t num_jobs = batch_size * num_heads;
+  const uint32_t grid_stride = gridDim.x * NUM_HEADS_PER_ITER;
+
+  // Each main warp ty processes one head; tx is the vec index within that head.
+  // Constraint: d <= warp_size * VEC_SIZE so a single warp covers the whole head.
+  assert(d <= warp_size * VEC_SIZE);
+  const uint32_t vec_idx = tx * VEC_SIZE;
+  const bool valid = vec_idx < d;
+
+  constexpr uint32_t cp_size = VEC_SIZE * sizeof(T);
+
+  // Shared memory layout (no smem_warp_sums / smem_rms_rcp; reductions are warp-local).
+  extern __shared__ char smem_raw[];
+  T* smem_weight     = reinterpret_cast<T*>(smem_raw);            // [d]
+  T* smem_input_next = smem_weight + d;                            // [NUM_HEADS_PER_ITER * d]
+
+  // Per-thread registers
+  float x_cur[VEC_SIZE];
+  float sum_sq = 0.f;
+  float x_next[VEC_SIZE];
+  float sum_sq_next = 0.f;
+#pragma unroll
+  for (uint32_t j = 0; j < VEC_SIZE; j++) {
+    x_cur[j] = 0.f;
+    x_next[j] = 0.f;
+  }
+
+  // -------------------------------------------------------------------------
+  // PDL: wait for grid dependencies
+  // -------------------------------------------------------------------------
+#if (__CUDACC_VER_MAJOR__ >= 12 && defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+  asm volatile("griddepcontrol.wait;");
+#endif
+
+  // =========================================================================
+  // Prologue
+  // =========================================================================
+
+  // --- Prologue Step 1: Helper prefetches weight → smem_weight (single head's worth of data) ---
+  if constexpr (HAS_WEIGHT) {
+    if (is_helper) {
+      const uint32_t copy_rounds_w = ceil_div(d, VEC_SIZE * num_helper_threads);
+      for (uint32_t i = 0; i < copy_rounds_w; i++) {
+        const uint32_t e = (i * num_helper_threads + helper_thread_id) * VEC_SIZE;
+        if (e < d) {
+          if constexpr (cp_size == 16 || cp_size == 8 || cp_size == 4) {
+            uint32_t dst_addr = static_cast<uint32_t>(
+                __cvta_generic_to_shared(smem_weight + e));
+            const T* src_ptr = weight + e;
+            asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
+                         ::"r"(dst_addr), "l"(src_ptr), "n"(cp_size));
+          } else {
+            vec_t<T, VEC_SIZE> tmp;
+            tmp.fill(0.f);
+            tmp.load(weight + e);
+            tmp.store(smem_weight + e);
+          }
+        }
+      }
+    }
+  }
+
+  const uint32_t prologue_batch_base = blockIdx.x * NUM_HEADS_PER_ITER;
+
+  // --- Prologue Step 2: Main warp ty loads its head from the first batch ---
+  if (!is_helper) {
+    vec_t<T, VEC_SIZE> inp_vec;
+    inp_vec.fill(0.f);
+    const uint32_t my_row = prologue_batch_base + ty;
+    if (valid && my_row < num_jobs) {
+      const uint32_t batch_idx = my_row / num_heads;
+      const uint32_t head_idx  = my_row % num_heads;
+      inp_vec.load(input + batch_idx * stride_input_n + head_idx * stride_input_h + vec_idx);
+    }
+#pragma unroll
+    for (uint32_t j = 0; j < VEC_SIZE; j++) {
+      float xi = float(inp_vec[j]);
+      x_cur[j]  = xi;
+      sum_sq   += xi * xi;
+    }
+  }
+
+  // --- Prologue Step 3: Helper prefetches next batch (NUM_HEADS_PER_ITER heads) → smem_input_next ---
+  if (is_helper) {
+    const uint32_t next_batch_base = prologue_batch_base + grid_stride;
+    const uint32_t elems_per_head = d / VEC_SIZE;
+    const uint32_t total_vecs = NUM_HEADS_PER_ITER * elems_per_head;
+    const uint32_t copy_rounds = ceil_div(total_vecs, num_helper_threads);
+    for (uint32_t i = 0; i < copy_rounds; i++) {
+      const uint32_t flat_vec_idx = i * num_helper_threads + helper_thread_id;
+      if (flat_vec_idx < total_vecs) {
+        const uint32_t h = flat_vec_idx / elems_per_head;
+        const uint32_t e = (flat_vec_idx % elems_per_head) * VEC_SIZE;
+        const uint32_t row = next_batch_base + h;
+        if (row < num_jobs) {
+          const uint32_t batch_idx = row / num_heads;
+          const uint32_t head_idx  = row % num_heads;
+          if constexpr (cp_size == 16 || cp_size == 8 || cp_size == 4) {
+            uint32_t dst_addr = static_cast<uint32_t>(
+                __cvta_generic_to_shared(smem_input_next + h * d + e));
+            const T* src_ptr = input + batch_idx * stride_input_n +
+                               head_idx * stride_input_h + e;
+            asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
+                         ::"r"(dst_addr), "l"(src_ptr), "n"(cp_size));
+          } else {
+            vec_t<T, VEC_SIZE> tmp;
+            tmp.fill(0.f);
+            tmp.load(input + batch_idx * stride_input_n +
+                     head_idx * stride_input_h + e);
+            tmp.store(smem_input_next + h * d + e);
+          }
+        }
+      }
+    }
+    if constexpr (cp_size == 16 || cp_size == 8 || cp_size == 4) {
+      asm volatile("cp.async.commit_group;\n");
+      asm volatile("cp.async.wait_group 0;\n");
+    }
+  }
+  __syncthreads();  // Prologue complete: weight + first prefetched batch visible to all threads
+
+  // =========================================================================
+  // Main loop: persistent, step = grid_stride = gridDim.x * NUM_HEADS_PER_ITER
+  // =========================================================================
+  for (uint32_t batch_base = prologue_batch_base; batch_base < num_jobs;
+       batch_base += grid_stride) {
+    const bool has_next = (batch_base + grid_stride) < num_jobs;
+    const bool has_next_next = (batch_base + 2 * grid_stride) < num_jobs;
+
+    // -----------------------------------------------------------------
+    // Sync A: ensure smem_input_next is ready (for DEFER_WAIT, helper
+    //         waits on its previously committed cp.async group here).
+    //         Prologue already committed+waited, so first iteration's
+    //         deferred wait is a no-op.
+    // -----------------------------------------------------------------
+    if (is_helper) {
+      if constexpr (DEFER_WAIT) {
+        if constexpr (cp_size == 16 || cp_size == 8 || cp_size == 4) {
+          asm volatile("cp.async.wait_group 0;\n");
+        }
+      }
+    }
+    __syncthreads();  // Sync A
+
+    // -----------------------------------------------------------------
+    // Step 1 (main warps): load next batch from smem; warp-reduce sum_sq;
+    //                      normalize x_cur and store output; compute x_next.
+    // -----------------------------------------------------------------
+    vec_t<T, VEC_SIZE> inp_next_vec;
+    inp_next_vec.fill(0.f);
+
+    if (!is_helper) {
+      // (a) Load this warp's next-batch head from smem
+      const uint32_t my_next_row = batch_base + grid_stride + ty;
+      if (has_next && valid && my_next_row < num_jobs) {
+        inp_next_vec.load(smem_input_next + ty * d + vec_idx);
+      }
+
+      // (b) Warp-reduce sum_sq → in-register rms_rcp (one warp = one head)
+#pragma unroll
+      for (uint32_t offset = warp_size / 2; offset > 0; offset /= 2) {
+        sum_sq += math::shfl_xor_sync(sum_sq, offset);
+      }
+      float rms_rcp = math::rsqrt(sum_sq / float(d) + eps);
+
+      // (c) Normalize x_cur and write output
+      const uint32_t my_row = batch_base + ty;
+      if (valid && my_row < num_jobs) {
+        const uint32_t batch_idx = my_row / num_heads;
+        const uint32_t head_idx  = my_row % num_heads;
+        vec_t<T, VEC_SIZE> weight_vec, out_vec;
+        weight_vec.fill(0.f);
+        out_vec.fill(0.f);
+        if constexpr (HAS_WEIGHT) {
+          weight_vec.load(smem_weight + vec_idx);
+#pragma unroll
+          for (uint32_t j = 0; j < VEC_SIZE; j++) {
+            out_vec[j] = x_cur[j] * rms_rcp * (weight_bias + float(weight_vec[j]));
+          }
+        } else {
+#pragma unroll
+          for (uint32_t j = 0; j < VEC_SIZE; j++) {
+            out_vec[j] = x_cur[j] * rms_rcp;
+          }
+        }
+        out_vec.store(output + batch_idx * stride_output_n + head_idx * stride_output_h +
+                      vec_idx);
+      }
+
+      // (d) Compute x_next, sum_sq_next
+      sum_sq_next = 0.f;
+      if (has_next && my_next_row < num_jobs) {
+#pragma unroll
+        for (uint32_t j = 0; j < VEC_SIZE; j++) {
+          float xi = float(inp_next_vec[j]);
+          x_next[j]    = xi;
+          sum_sq_next += xi * xi;
+        }
+      }
+
+      // (e) Swap current ← next
+#pragma unroll
+      for (uint32_t j = 0; j < VEC_SIZE; j++) {
+        x_cur[j] = x_next[j];
+      }
+      sum_sq = sum_sq_next;
+    }
+
+    __syncthreads();  // Sync B: main done reading smem_input_next; helper may overwrite
+
+    // -----------------------------------------------------------------
+    // Step 2 (helper warps): prefetch the next-next batch into smem_input_next.
+    //                        No __syncthreads() after — deferred to next iteration's Sync A.
+    // -----------------------------------------------------------------
+    if (is_helper && has_next_next) {
+      const uint32_t nn_batch_base = batch_base + 2 * grid_stride;
+      const uint32_t elems_per_head = d / VEC_SIZE;
+      const uint32_t total_vecs = NUM_HEADS_PER_ITER * elems_per_head;
+      const uint32_t copy_rounds = ceil_div(total_vecs, num_helper_threads);
+      for (uint32_t i = 0; i < copy_rounds; i++) {
+        const uint32_t flat_vec_idx = i * num_helper_threads + helper_thread_id;
+        if (flat_vec_idx < total_vecs) {
+          const uint32_t h = flat_vec_idx / elems_per_head;
+          const uint32_t e = (flat_vec_idx % elems_per_head) * VEC_SIZE;
+          const uint32_t row = nn_batch_base + h;
+          if (row < num_jobs) {
+            const uint32_t batch_idx = row / num_heads;
+            const uint32_t head_idx  = row % num_heads;
+            if constexpr (cp_size == 16 || cp_size == 8 || cp_size == 4) {
+              uint32_t dst_addr = static_cast<uint32_t>(
+                  __cvta_generic_to_shared(smem_input_next + h * d + e));
+              const T* src_ptr = input + batch_idx * stride_input_n +
+                                 head_idx * stride_input_h + e;
+              asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
+                           ::"r"(dst_addr), "l"(src_ptr), "n"(cp_size));
+            } else {
+              vec_t<T, VEC_SIZE> tmp;
+              tmp.fill(0.f);
+              tmp.load(input + batch_idx * stride_input_n +
+                       head_idx * stride_input_h + e);
+              tmp.store(smem_input_next + h * d + e);
+            }
+          }
+        }
+      }
+      if constexpr (cp_size == 16 || cp_size == 8 || cp_size == 4) {
+        asm volatile("cp.async.commit_group;\n");
+        if constexpr (!DEFER_WAIT) {
+          asm volatile("cp.async.wait_group 0;\n");
+        }
+      }
+    }
+    // NO sync here — deferred to next iteration's Sync A.
+  }  // end persistent loop
+
+  // =========================================================================
+  // PDL: signal dependents
+  // =========================================================================
+#if (__CUDACC_VER_MAJOR__ >= 12 && defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+  asm volatile("griddepcontrol.launch_dependents;");
+#endif
+}  // end QKRMSNormPersistentKernel
 
 template <typename T>
 cudaError_t QKRMSNorm(T* input, T* weight, T* output, uint32_t batch_size, uint32_t num_heads,
@@ -1270,13 +1627,9 @@ cudaError_t QKRMSNorm(T* input, T* weight, T* output, uint32_t batch_size, uint3
                       uint32_t stride_output_n, uint32_t stride_output_h, float eps = 1e-5,
                       bool enable_pdl = false, cudaStream_t stream = 0) {
   const uint32_t vec_size = std::gcd(16 / sizeof(T), d);
-  const uint32_t num_warps = 4;
-  const uint32_t smem_size = 0;
-
   float weight_bias = 0.f;
 
   cudaLaunchConfig_t config;
-  config.dynamicSmemBytes = smem_size;
   config.stream = stream;
   cudaLaunchAttribute attrs[1];
   attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
@@ -1285,26 +1638,144 @@ cudaError_t QKRMSNorm(T* input, T* weight, T* output, uint32_t batch_size, uint3
   config.attrs = attrs;
 
   DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {
-    auto kernel = QKRMSNormKernel<VEC_SIZE, T>;
+    const uint32_t num_jobs = batch_size * num_heads;
 
-    // calculate launching blocks
-    int num_blocks_per_sm = 0, num_sms = 0, dev_id = 0;
-    FLASHINFER_CUDA_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&num_blocks_per_sm, kernel,
-                                                                       num_warps * 32, smem_size));
-    FLASHINFER_CUDA_CALL(cudaGetDevice(&dev_id));
-    FLASHINFER_CUDA_CALL(cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, dev_id));
+    // --- Persistent kernel path ---
+    // Condition: each warp can process a head in 1 round (d <= 32 * VEC_SIZE)
+    const uint32_t rounds_per_warp = ceil_div(d, (uint32_t)VEC_SIZE * 32u);
+    bool used_persistent = false;
 
-    const int needed_blocks = ceil_div(batch_size * num_heads, num_warps);
-    dim3 nblks(std::min(num_blocks_per_sm * num_sms, needed_blocks));
-    dim3 nthrs(32, num_warps);
-    config.gridDim = nblks;
-    config.blockDim = nthrs;
+    if (rounds_per_warp <= 1) {
+      constexpr uint32_t NUM_HEADS_PER_ITER = 16;
+      constexpr uint32_t NUM_HELPER_WARPS = 4;
+      const uint32_t num_warps_total = NUM_HEADS_PER_ITER + NUM_HELPER_WARPS;
 
-    // execute kernel
-    FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel, input, weight, output, d, batch_size,
-                                            num_heads, stride_input_n, stride_input_h,
-                                            stride_output_n, stride_output_h, weight_bias, eps));
+      // smem: weight[d] + input_next[NUM_HEADS_PER_ITER * d]
+      const uint32_t persistent_smem_size =
+          (1u + NUM_HEADS_PER_ITER) * d * static_cast<uint32_t>(sizeof(T));
+
+      // Use a representative kernel for occupancy query
+      auto persistent_kernel_fn =
+          QKRMSNormPersistentKernel<VEC_SIZE, T, NUM_HEADS_PER_ITER, NUM_HELPER_WARPS, false, true>;
+
+      int num_blocks_per_sm = 0, num_sms = 0, dev_id = 0;
+      FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(persistent_kernel_fn,
+                                                cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                                persistent_smem_size));
+      FLASHINFER_CUDA_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+          &num_blocks_per_sm, persistent_kernel_fn, num_warps_total * 32, persistent_smem_size));
+      FLASHINFER_CUDA_CALL(cudaGetDevice(&dev_id));
+      FLASHINFER_CUDA_CALL(
+          cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, dev_id));
+
+      const uint32_t total_persistent_blocks =
+          static_cast<uint32_t>(num_blocks_per_sm * num_sms);
+
+      if (total_persistent_blocks > 0) {
+        // Grid size: enough blocks to cover all jobs, capped by hardware
+        const uint32_t needed_blocks = ceil_div(num_jobs, NUM_HEADS_PER_ITER);
+        const uint32_t num_persistent_blocks =
+            std::min(needed_blocks, total_persistent_blocks);
+        dim3 nblks_persistent(num_persistent_blocks);
+        dim3 nthrs_persistent(32, num_warps_total);
+        config.gridDim = nblks_persistent;
+        config.blockDim = nthrs_persistent;
+        config.dynamicSmemBytes = persistent_smem_size;
+
+        if (num_jobs > 2 * num_persistent_blocks * NUM_HEADS_PER_ITER) {
+          // Large workload: defer wait for better overlap
+          if (weight != nullptr) {
+            auto kernel_fn =
+                QKRMSNormPersistentKernel<VEC_SIZE, T, NUM_HEADS_PER_ITER, NUM_HELPER_WARPS, true, true>;
+            FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(kernel_fn,
+                                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                                     persistent_smem_size));
+            FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel_fn, input, weight,
+                                                   output, d, batch_size, num_heads,
+                                                   stride_input_n, stride_input_h,
+                                                   stride_output_n, stride_output_h,
+                                                   weight_bias, eps));
+          } else {
+            auto kernel_fn =
+                QKRMSNormPersistentKernel<VEC_SIZE, T, NUM_HEADS_PER_ITER, NUM_HELPER_WARPS, true, false>;
+            FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(kernel_fn,
+                                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                                     persistent_smem_size));
+            FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel_fn, input, weight,
+                                                   output, d, batch_size, num_heads,
+                                                   stride_input_n, stride_input_h,
+                                                   stride_output_n, stride_output_h,
+                                                   weight_bias, eps));
+          }
+        } else {
+          // Small workload: commit + wait together
+          if (weight != nullptr) {
+            FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, persistent_kernel_fn, input, weight,
+                                                   output, d, batch_size, num_heads,
+                                                   stride_input_n, stride_input_h,
+                                                   stride_output_n, stride_output_h,
+                                                   weight_bias, eps));
+          } else {
+            auto kernel_fn =
+                QKRMSNormPersistentKernel<VEC_SIZE, T, NUM_HEADS_PER_ITER, NUM_HELPER_WARPS, false, false>;
+            FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(kernel_fn,
+                                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                                     persistent_smem_size));
+            FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel_fn, input, weight,
+                                                   output, d, batch_size, num_heads,
+                                                   stride_input_n, stride_input_h,
+                                                   stride_output_n, stride_output_h,
+                                                   weight_bias, eps));
+          }
+        }
+        used_persistent = true;
+      }
+    }
+
+    if (!used_persistent) {
+      // Fallback: original warp-per-row kernel
+      const uint32_t fallback_num_warps = 4;
+      const uint32_t smem_size = 0;
+      config.dynamicSmemBytes = smem_size;
+
+      if (weight != nullptr) {
+        auto kernel = QKRMSNormKernel<VEC_SIZE, T, true>;
+        int num_blocks_per_sm = 0, num_sms = 0, dev_id = 0;
+        FLASHINFER_CUDA_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+            &num_blocks_per_sm, kernel, fallback_num_warps * 32, smem_size));
+        FLASHINFER_CUDA_CALL(cudaGetDevice(&dev_id));
+        FLASHINFER_CUDA_CALL(
+            cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, dev_id));
+        const int needed_blocks = ceil_div(batch_size * num_heads, fallback_num_warps);
+        dim3 nblks(std::min(num_blocks_per_sm * num_sms, needed_blocks));
+        dim3 nthrs(32, fallback_num_warps);
+        config.gridDim = nblks;
+        config.blockDim = nthrs;
+        FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel, input, weight, output, d,
+                                                batch_size, num_heads, stride_input_n,
+                                                stride_input_h, stride_output_n,
+                                                stride_output_h, weight_bias, eps));
+      } else {
+        auto kernel = QKRMSNormKernel<VEC_SIZE, T, false>;
+        int num_blocks_per_sm = 0, num_sms = 0, dev_id = 0;
+        FLASHINFER_CUDA_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+            &num_blocks_per_sm, kernel, fallback_num_warps * 32, smem_size));
+        FLASHINFER_CUDA_CALL(cudaGetDevice(&dev_id));
+        FLASHINFER_CUDA_CALL(
+            cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, dev_id));
+        const int needed_blocks = ceil_div(batch_size * num_heads, fallback_num_warps);
+        dim3 nblks(std::min(num_blocks_per_sm * num_sms, needed_blocks));
+        dim3 nthrs(32, fallback_num_warps);
+        config.gridDim = nblks;
+        config.blockDim = nthrs;
+        FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel, input, weight, output, d,
+                                                batch_size, num_heads, stride_input_n,
+                                                stride_input_h, stride_output_n,
+                                                stride_output_h, weight_bias, eps));
+      }
+    }
   });
+
   return cudaSuccess;
 }
 
