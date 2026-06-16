@@ -2893,9 +2893,9 @@ __device__ __forceinline__ void BatchPrefillWithPagedKVCacheDevice(
                                       lane_idx / KV_THR_LAYOUT_COL +
                                       KV_THR_LAYOUT_ROW * NUM_WARPS_Q * NUM_WARPS_KV * i,
                                   page_iter, entry_idx);
+      constexpr uint32_t fp4_pack_factor = is_fp4_type_v<DTypeKV> ? 2 : 1;
 #if SAIL_ARCH_SM80_FEAT
       // FP4: GMEM is packed (2 FP4/byte), so the column byte offset is halved relative to fp8
-      constexpr uint32_t fp4_pack_factor = is_fp4_type_v<DTypeKV> ? 2 : 1;
       thr_local_kv_offset[i] = paged_kv.protective_get_kv_offset_sail(
           thr_local_kv_offset_ldg_iter[i], page_iter, kv_head_idx, entry_idx,
           (lane_idx % KV_THR_LAYOUT_COL) * upcast_size<DTypeKV>() / fp4_pack_factor, last_indptr);
