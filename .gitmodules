@@ -1,6 +1,6 @@
 [submodule "3rdparty/cutlass"]
 	path = 3rdparty/cutlass
-	url = http://gitlab.alibaba-inc.com/ppu_open_source/cutlass3.git
+	url = git@gitlab.alibaba-inc.com:ppu_open_source/cutlass3.git
 	branch = v3.6.0_sail_v2.1.0.post1
 [submodule "3rdparty/spdlog"]
 	path = 3rdparty/spdlog
