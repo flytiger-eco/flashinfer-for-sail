@@ -2454,16 +2454,13 @@ cudaError_t GemmaFusedAddRMSNorm(T* input, T* residual, T* weight, uint32_t batc
 
   const uint32_t block_size = std::min<uint32_t>(1024, d / vec_size);
   const uint32_t num_warps = ceil_div(block_size, 32);
-dim3 nblks(batch_size);
+  dim3 nblks(batch_size);
   dim3 nthrs(32, num_warps);
-  // NOTE(Zihao): use ceil_div(num_warps, 4) * 4 for address alignment to 16 bytes
-const uint32_t smem_size = (ceil_div(num_warps, 4) * 4 + d) * sizeof(float);
+  const uint32_t smem_size = (ceil_div(num_warps, 4) * 4 + d) * sizeof(float);
   float weight_bias = 1.f;
-void* args[] = {&input,        &residual,        &weight,      &d,
-                  &stride_input, &stride_residual, &weight_bias, &eps};
 
   cudaLaunchConfig_t config;
-config.gridDim = nblks;
+  config.gridDim = nblks;
   config.blockDim = nthrs;
   config.dynamicSmemBytes = smem_size;
   config.stream = stream;
@@ -2473,14 +2470,65 @@ config.gridDim = nblks;
   config.numAttrs = 1;
   config.attrs = attrs;
 
-      DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {
+  DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {
+    constexpr uint32_t NUM_HELPER_WARPS = 4;
+    const uint32_t num_threads_main = num_warps * 32;
+    const uint32_t rounds = ceil_div(d, (uint32_t)VEC_SIZE * num_threads_main);
+
+    bool used_persistent = false;
+    if (num_warps + NUM_HELPER_WARPS <= 32 && rounds <= 1) {
+      const uint32_t num_warps_total = num_warps + NUM_HELPER_WARPS;
+      const uint32_t float_region_bytes =
+          (num_warps + 1u) * static_cast<uint32_t>(sizeof(float));
+      const uint32_t aligned_float_region = (float_region_bytes + 15u) & ~15u;
+      const uint32_t persistent_smem_size =
+          aligned_float_region + 3u * d * static_cast<uint32_t>(sizeof(T));
+
+      auto persistent_kernel_fn =
+          FusedAddRMSNormPersistentKernel<VEC_SIZE, T, NUM_HELPER_WARPS>;
+
+      int num_blocks_per_sm = 0, num_sms = 0, dev_id = 0;
+      FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(persistent_kernel_fn,
+                                               cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                               persistent_smem_size));
+      FLASHINFER_CUDA_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+          &num_blocks_per_sm, persistent_kernel_fn, num_warps_total * 32, persistent_smem_size));
+      FLASHINFER_CUDA_CALL(cudaGetDevice(&dev_id));
+      FLASHINFER_CUDA_CALL(
+          cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, dev_id));
+
+      const uint32_t total_persistent_blocks =
+          static_cast<uint32_t>(num_blocks_per_sm * num_sms);
+
+      if (total_persistent_blocks > 0 && batch_size >= total_persistent_blocks) {
+        dim3 nblks_persistent(total_persistent_blocks);
+        dim3 nthrs_persistent(32, num_warps_total);
+        config.gridDim = nblks_persistent;
+        config.blockDim = nthrs_persistent;
+        config.dynamicSmemBytes = persistent_smem_size;
+
+        FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, persistent_kernel_fn, input, residual,
+                                               weight, batch_size, d, stride_input,
+                                               stride_residual, weight_bias, eps));
+        used_persistent = true;
+      }
+    }
+
+    if (!used_persistent) {
+      dim3 nblks_fallback(batch_size);
+      const uint32_t smem_size_fallback = (ceil_div(num_warps, 4) * 4 + d) * sizeof(float);
+      config.gridDim = nblks_fallback;
+      config.blockDim = nthrs;
+      config.dynamicSmemBytes = smem_size_fallback;
+
       auto kernel = FusedAddRMSNormKernel<VEC_SIZE, T>;
       FLASHINFER_CUDA_CALL(
-          cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+          cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size_fallback));
       FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel, input, residual, weight, d,
                                               stride_input, stride_residual, weight_bias, eps));
-    });
-  
+    }
+  });
+
   return cudaSuccess;
 }
 
