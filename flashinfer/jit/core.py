@@ -727,10 +727,9 @@ def gen_jit_spec(
     including the module-wide ``use_fast_math`` setting.
     """
     check_cuda_arch()
-    # Use FLASHINFER_JIT_DEBUG if set, otherwise use FLASHINFER_JIT_VERBOSE (for backward compatibility)
-    debug_env = os.environ.get("FLASHINFER_JIT_DEBUG")
-    verbose_env = os.environ.get("FLASHINFER_JIT_VERBOSE", "0")
-    debug = (debug_env if debug_env is not None else verbose_env) == "1"
+    # FLASHINFER_JIT_DEBUG controls debug compilation flags (-O0, -G, etc.)
+    # FLASHINFER_JIT_VERBOSE only controls build output verbosity, not compilation flags
+    debug = os.environ.get("FLASHINFER_JIT_DEBUG", "0") == "1"
 
     # Only add default C++ standard if not specified in extra flags
     cflags_has_std = extra_cflags is not None and any(
@@ -801,7 +800,10 @@ def gen_jit_spec(
             cuda_cflags_by_source[source] = source_defaults + list(source_flags)
     if extra_cuda_cflags is not None:
         cuda_cflags += extra_cuda_cflags
-
+    USE_SAIL = 'PPU_SDK' in os.environ.keys()
+    if USE_SAIL:
+        cflags.append("-DUSE_SAIL")
+        cuda_cflags.append("-DUSE_SAIL")
     spec = JitSpecNvcc(
         name=name,
         sources=[Path(x) for x in sources],
