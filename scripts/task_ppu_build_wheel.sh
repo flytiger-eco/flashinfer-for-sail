@@ -22,6 +22,14 @@ export FLASHINFER_CUDA_ARCH_LIST
 export AOT_MAX_JOBS_MEMORY_GB
 compute_jit_cache_parallelism
 
+# Optional compiler cache. When FLASHINFER_ENABLE_CCACHE=1 (set by the ccache
+# CI workflows) route nvcc/host compilation through ccache, storing objects in
+# CCACHE_DIR (typically /workspace/.ccache, persisted by the GitHub Actions
+# cache) so PR builds can reuse objects warmed on the base branch.
+if [ "${FLASHINFER_ENABLE_CCACHE:-0}" = "1" ]; then
+  setup_ccache
+fi
+
 echo "========================================"
 echo "Build environment"
 echo "========================================"
@@ -48,6 +56,12 @@ echo "========================================"
 echo "Running AOT compilation"
 echo "========================================"
 python -m flashinfer.aot
+
+if [ "${FLASHINFER_ENABLE_CCACHE:-0}" = "1" ] && command -v ccache >/dev/null 2>&1; then
+  echo ""
+  echo "ccache statistics after AOT compilation:"
+  ccache --show-stats || true
+fi
 
 echo ""
 echo "========================================"

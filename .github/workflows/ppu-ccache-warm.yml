@@ -1,37 +1,25 @@
-# PPU build pipeline.
-# Compiles flashinfer-for-sail (AOT) inside the PPU build container and
-# produces an installable wheel.
+# PPU ccache warm-up pipeline.
+# Compiles flashinfer-for-sail (AOT) inside the PPU build container with ccache
+# enabled, then persists the ccache directory through the GitHub Actions cache.
+# PR runs of "PPU Linux Build" restore this cache and compile incrementally
+# instead of from scratch.
 #
-# Stages:
-#   1. Pull the build image
-#   2. Start the container (ci/bash.sh, workspace mounted at /workspace)
-#   3. Provide the source tree (actions/checkout + submodules, mounted in)
-#   4. Install build dependencies (inside container)
-#   5. AOT compile, build the wheel, install and verify it (inside container)
+# Runs on push to v0.6.12 (the base branch of PPU build PRs) so the warmed
+# cache is visible to those PRs, and on demand via workflow_dispatch. It does
+# NOT run on pull_request: fork/PR runs cannot write caches back to the base
+# branch, so warming must happen from a trusted base-branch context.
 #
-# Triggered on push / PR to v0.6.12 and manually via workflow_dispatch.
-# The code under test is the current checkout (not a fixed clone), so PRs
-# validate their own changes.
+# ccache stores objects under /workspace/.ccache (mounted from the runner
+# workspace), which actions/cache saves/restores as ${{ github.workspace }}/.ccache.
 #
 # The build image is pulled from GHCR, which is on the same network as the
 # runners. Mirror a new vendor image tag there with ppu-mirror-image.yml first.
 
-name: PPU Linux Build
+name: PPU Ccache Warm
 
 on:
   push:
     branches: [v0.6.12]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'docker/**'
-      - 'licenses/**'
-      - 'benchmarks/**'
-      - 'LICENSE'
-      - 'NOTICE'
-  pull_request:
-    branches: [v0.6.12]
-    types: [opened, synchronize, reopened, ready_for_review]
     paths-ignore:
       - '**.md'
       - 'docs/**'
@@ -48,7 +36,7 @@ on:
         default: '8.0'
 
 concurrency:
-  group: ppu-linux-build-${{ github.ref }}
+  group: ppu-ccache-warm-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -56,22 +44,20 @@ permissions:
   packages: read
 
 env:
-  # Mirrored from pkg.flytiger-eco.com by ppu-mirror-image.yml. Pulling the
+  # Mirrored from pkg.flytiger-eco.com by ppu-mirror-image.yml. Keep in sync
+  # with ppu-linux-build.yml so the warmed cache matches the PR build image.
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/flashinfer-ppu-build:v2.1.1-pytorch2.11.0-ubuntu24.04-cuda13.0-sglang0.5.13-py312
   CUDA_ARCH_LIST: ${{ github.event.inputs.cuda_arch_list || '8.0' }}
-  # Per-compile-job memory budget used to derive MAX_JOBS. A standard hosted
-  # runner has 2 cores and ~7GB RAM, so 3GB/job lets both cores stay busy
-  # without inviting the OOM killer. Raise it if nvcc gets killed.
+  # Per-compile-job memory budget used to derive MAX_JOBS. See ppu-linux-build.yml.
   AOT_MAX_JOBS_MEMORY_GB: '3'
-  # ccache directory on the runner, mounted into the container at
-  # /workspace/.ccache. Restored from the cache warmed by ppu-ccache-warm.yml so
-  # PR builds compile incrementally instead of from scratch.
+  # ccache directory, inside the container's /workspace mount so the GitHub
+  # Actions cache (which runs on the host) can persist it.
   CCACHE_DIR_HOST: ${{ github.workspace }}/.ccache
   CCACHE_MAXSIZE: '5G'
 
 jobs:
-  build:
-    name: PPU Build (wheel)
+  warm:
+    name: PPU Ccache Warm (AOT)
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
@@ -89,8 +75,6 @@ jobs:
 
       - name: Free disk space
         run: |
-          # The build image plus AOT objects need tens of GB. Larger runners have
-          # room to spare, so only strip preinstalled SDKs when space is tight.
           AVAIL_GB=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
           echo "Available on /: ${AVAIL_GB} GB"
           if [ "${AVAIL_GB:-0}" -lt 60 ]; then
@@ -101,13 +85,6 @@ jobs:
             echo "Enough free space, skipping preinstalled SDK cleanup"
           fi
 
-      # Stage 1: pull the build image from GHCR.
-      # ci/bash.sh pulls again right before `docker run`, but that is a cached
-      # no-op. Pulling here keeps registry/network failures visible as their own
-      # step instead of being buried in the build log.
-      #
-      # Logging in is not required while the package is public, but keeps this
-      # working if its visibility is ever flipped back to private.
       - name: Pull Image
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" \
@@ -119,10 +96,20 @@ jobs:
           docker images "${IMAGE_NAME}"
           df -h /
 
-      # Stage 3: the source tree the container will compile (mounted, not cloned).
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      # Restore the previous ccache so the warm build is itself incremental.
+      # Saving happens in a separate step below with a run-unique key.
+      - name: Restore ccache
+        id: restore-ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CCACHE_DIR_HOST }}
+          key: ppu-ccache-${{ runner.os }}-arch${{ env.CUDA_ARCH_LIST }}-${{ github.sha }}
+          restore-keys: |
+            ppu-ccache-${{ runner.os }}-arch${{ env.CUDA_ARCH_LIST }}-
 
       - name: Show Node Info
         run: |
@@ -135,20 +122,7 @@ jobs:
           free -h
           nvidia-smi 2>/dev/null || echo "no gpu on build node"
 
-      # Restore the ccache warmed on the base branch by ppu-ccache-warm.yml.
-      # Restore-only: PR builds consume the cache but do not write it back (the
-      # warm workflow owns saving). A miss just means a full compile.
-      - name: Restore ccache
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ env.CCACHE_DIR_HOST }}
-          key: ppu-ccache-${{ runner.os }}-arch${{ env.CUDA_ARCH_LIST }}-${{ github.sha }}
-          restore-keys: |
-            ppu-ccache-${{ runner.os }}-arch${{ env.CUDA_ARCH_LIST }}-
-
-      # Stages 2, 4, 5: start the container on the checked-out tree, then install
-      # dependencies and build the wheel via scripts/task_ppu_build_wheel.sh.
-      - name: Build Wheel
+      - name: Warm ccache (AOT build)
         run: |
           bash ci/bash.sh "${IMAGE_NAME}" \
             -e TORCH_CUDA_ARCH_LIST "${CUDA_ARCH_LIST}" \
@@ -159,27 +133,33 @@ jobs:
             -e CCACHE_MAXSIZE "${CCACHE_MAXSIZE}" \
             --no-gpu ./scripts/task_ppu_build_wheel.sh
 
-      - name: Upload Wheel
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: flashinfer-for-sail-wheel-${{ github.run_number }}
-          path: dist/*.whl
-          if-no-files-found: error
-          retention-days: 14
-
-      - name: Build Summary
+      # Make the container-written (root-owned) ccache readable by the runner
+      # user so actions/cache can archive it.
+      - name: Normalize ccache permissions
         if: "!cancelled()"
         run: |
-          echo "## PPU Linux Build" >> $GITHUB_STEP_SUMMARY
+          sudo chmod -R a+rX "${CCACHE_DIR_HOST}" 2>/dev/null || true
+
+      # Save with a run-unique key. GitHub cache keys are write-once, so the
+      # github.sha suffix avoids collisions while the shared prefix lets PR
+      # builds restore the newest entry via restore-keys.
+      - name: Save ccache
+        if: "!cancelled()"
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR_HOST }}
+          key: ppu-ccache-${{ runner.os }}-arch${{ env.CUDA_ARCH_LIST }}-${{ github.sha }}-${{ github.run_id }}
+
+      - name: Warm Summary
+        if: "!cancelled()"
+        run: |
+          echo "## PPU Ccache Warm" >> $GITHUB_STEP_SUMMARY
           echo "- Image: \`${IMAGE_NAME}\`" >> $GITHUB_STEP_SUMMARY
           echo "- Arch list: \`${CUDA_ARCH_LIST}\`" >> $GITHUB_STEP_SUMMARY
           echo "- Commit: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Cache key prefix: \`ppu-ccache-${{ runner.os }}-arch${CUDA_ARCH_LIST}-\`" >> $GITHUB_STEP_SUMMARY
           if [ "${{ job.status }}" == "success" ]; then
-            echo "- Status: Passed" >> $GITHUB_STEP_SUMMARY
-            for whl in dist/*.whl; do
-              [ -e "$whl" ] && echo "- Wheel: \`$(basename "$whl")\`" >> $GITHUB_STEP_SUMMARY
-            done
+            echo "- Status: Cache warmed" >> $GITHUB_STEP_SUMMARY
           else
             echo "- Status: Failed" >> $GITHUB_STEP_SUMMARY
           fi

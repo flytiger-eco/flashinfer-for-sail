@@ -147,3 +147,60 @@ setup_sccache() {
   echo "sccache prefix: ${SCCACHE_S3_KEY_PREFIX}"
   echo "sccache basedirs: ${SCCACHE_BASEDIRS}"
 }
+
+# Route nvcc and the host compiler through ccache so compiled objects land in
+# CCACHE_DIR. When that directory lives under the mounted workspace, a GitHub
+# Actions cache can persist it across runs, letting later builds compile
+# incrementally. This is an alternative to setup_sccache for CI environments
+# that only have GitHub's cache (no S3 bucket).
+#
+# No-op (build proceeds without a compiler cache) when ccache is missing and
+# cannot be installed.
+#
+# Reads (optional): CCACHE_DIR (default: <cwd>/.ccache), CCACHE_MAXSIZE
+#   (default: 5G), CCACHE_BASEDIR, CCACHE_COMPILERCHECK, CCACHE_SLOPPINESS.
+# Sets/exports: CCACHE_*, FLASHINFER_NVCC_LAUNCHER, FLASHINFER_CXX_LAUNCHER.
+setup_ccache() {
+  if ! command -v ccache >/dev/null 2>&1; then
+    echo "ccache not found; attempting to install it"
+    local sudo=""
+    if [ "$(id -u)" != "0" ] && command -v sudo >/dev/null 2>&1; then
+      sudo="sudo"
+    fi
+    if command -v apt-get >/dev/null 2>&1; then
+      ${sudo} apt-get update && ${sudo} apt-get install -y ccache || {
+        echo "WARNING: failed to install ccache; building without a compiler cache"
+        return 0
+      }
+    else
+      echo "WARNING: no apt-get available to install ccache; building without a compiler cache"
+      return 0
+    fi
+  fi
+
+  export CCACHE_DIR="${CCACHE_DIR:-$(pwd)/.ccache}"
+  export CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-5G}"
+  # Rewrite absolute paths under the source root to relative ones so objects
+  # stay reusable even if the checkout path changes between runs.
+  export CCACHE_BASEDIR="${CCACHE_BASEDIR:-$(pwd)}"
+  export CCACHE_NOHASHDIR=1
+  # The build image is fixed per run, so hashing compiler content is robust
+  # against mtime-only changes that would otherwise miss.
+  export CCACHE_COMPILERCHECK="${CCACHE_COMPILERCHECK:-content}"
+  # Tolerate volatile header timestamps to keep the hit rate high.
+  export CCACHE_SLOPPINESS="${CCACHE_SLOPPINESS:-time_macros,include_file_mtime,include_file_ctime}"
+
+  mkdir -p "${CCACHE_DIR}"
+
+  export FLASHINFER_NVCC_LAUNCHER="ccache"
+  export FLASHINFER_CXX_LAUNCHER="ccache"
+
+  ccache --max-size="${CCACHE_MAXSIZE}" >/dev/null 2>&1 || true
+  ccache --zero-stats >/dev/null 2>&1 || true
+
+  echo "ccache enabled:"
+  echo "  - version: $(ccache --version | head -n1)"
+  echo "  - CCACHE_DIR: ${CCACHE_DIR}"
+  echo "  - CCACHE_MAXSIZE: ${CCACHE_MAXSIZE}"
+  echo "  - CCACHE_BASEDIR: ${CCACHE_BASEDIR}"
+}
