@@ -1,0 +1,168 @@
+# PPU build pipeline.
+# Compiles flashinfer-for-sail (AOT) inside the PPU build container and
+# produces an installable wheel.
+#
+# Stages:
+#   1. Pull the build image
+#   2. Start the container (ci/bash.sh, workspace mounted at /workspace)
+#   3. Provide the source tree (actions/checkout + submodules, mounted in)
+#   4. Install build dependencies (inside container)
+#   5. AOT compile, build the wheel, install and verify it (inside container)
+#
+# Triggered on push / PR to v0.6.12 and manually via workflow_dispatch.
+# The code under test is the current checkout (not a fixed clone), so PRs
+# validate their own changes.
+#
+# The build image is pulled from GHCR, which is on the same network as the
+# runners. Mirror a new vendor image tag there with ppu-mirror-image.yml first.
+
+name: PPU Linux Build
+
+on:
+  push:
+    branches: [v0.6.12]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'docker/**'
+      - 'licenses/**'
+      - 'benchmarks/**'
+      - 'LICENSE'
+      - 'NOTICE'
+  pull_request:
+    branches: [v0.6.12]
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'docker/**'
+      - 'licenses/**'
+      - 'benchmarks/**'
+      - 'LICENSE'
+      - 'NOTICE'
+  workflow_dispatch:
+    inputs:
+      cuda_arch_list:
+        description: 'Target CUDA arch list (TORCH_CUDA_ARCH_LIST / FLASHINFER_CUDA_ARCH_LIST)'
+        type: string
+        default: '8.0'
+
+concurrency:
+  group: ppu-linux-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  # Mirrored from pkg.flytiger-eco.com by ppu-mirror-image.yml. Pulling the
+  # vendor registry directly on every build is too slow.
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/flashinfer-ppu-build:v2.1.1-pytorch2.11.0-ubuntu24.04-cuda13.0-sglang0.5.13-py312
+  CUDA_ARCH_LIST: ${{ github.event.inputs.cuda_arch_list || '8.0' }}
+  # Per-compile-job memory budget used to derive MAX_JOBS. A standard hosted
+  # runner has 2 cores and ~7GB RAM, so 3GB/job lets both cores stay busy
+  # without inviting the OOM killer. Raise it if nvcc gets killed.
+  AOT_MAX_JOBS_MEMORY_GB: '3'
+
+jobs:
+  build:
+    name: PPU Build (wheel)
+    runs-on: ubuntu-latest
+    # 360 minutes is also GitHub's hard ceiling for hosted-runner jobs.
+    timeout-minutes: 360
+    steps:
+      - name: Cleanup
+        run: |
+          # Stop leftover containers from previous runs to free memory
+          docker stop $(docker ps -q) 2>/dev/null || true
+          docker rm $(docker ps -aq) 2>/dev/null || true
+          # Clean workspace and JIT cache
+          sudo rm -rf ${{ github.workspace }}/* || true
+          sudo rm -rf ${{ github.workspace }}/.[!.]* || true
+          rm -rf ~/.cache/flashinfer_jit || true
+          docker image prune -f || true
+          docker builder prune -f --filter "until=24h" || true
+
+      - name: Free disk space
+        run: |
+          # The build image plus AOT objects need tens of GB. Larger runners have
+          # room to spare, so only strip preinstalled SDKs when space is tight.
+          AVAIL_GB=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
+          echo "Available on /: ${AVAIL_GB} GB"
+          if [ "${AVAIL_GB:-0}" -lt 60 ]; then
+            sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+              /usr/local/share/boost /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
+            df -h /
+          else
+            echo "Enough free space, skipping preinstalled SDK cleanup"
+          fi
+
+      # Stage 1: pull the build image from GHCR.
+      # ci/bash.sh pulls again right before `docker run`, but that is a cached
+      # no-op. Pulling here keeps registry/network failures visible as their own
+      # step instead of being buried in the build log.
+      #
+      # Logging in is not required while the package is public, but keeps this
+      # working if its visibility is ever flipped back to private.
+      - name: Pull Image
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker pull "${IMAGE_NAME}" || {
+            echo "::error::Failed to pull ${IMAGE_NAME}. If the tag is missing, mirror it first by running the 'PPU Mirror Image' workflow."
+            exit 1
+          }
+          docker images "${IMAGE_NAME}"
+          df -h /
+
+      # Stage 3: the source tree the container will compile (mounted, not cloned).
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Show Node Info
+        run: |
+          echo "===== RUNNER INFO ====="
+          echo "runner: ${{ runner.name }} (${{ runner.environment }})"
+          echo "run number: ${{ github.run_number }}"
+          echo "workspace: ${{ github.workspace }}"
+          df --human-readable
+          nproc
+          free -h
+          nvidia-smi 2>/dev/null || echo "no gpu on build node"
+
+      # Stages 2, 4, 5: start the container on the checked-out tree, then install
+      # dependencies and build the wheel via scripts/task_ppu_build_wheel.sh.
+      - name: Build Wheel
+        run: |
+          bash ci/bash.sh "${IMAGE_NAME}" \
+            -e TORCH_CUDA_ARCH_LIST "${CUDA_ARCH_LIST}" \
+            -e FLASHINFER_CUDA_ARCH_LIST "${CUDA_ARCH_LIST}" \
+            -e AOT_MAX_JOBS_MEMORY_GB "${AOT_MAX_JOBS_MEMORY_GB}" \
+            --no-gpu ./scripts/task_ppu_build_wheel.sh
+
+      - name: Upload Wheel
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flashinfer-for-sail-wheel-${{ github.run_number }}
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Build Summary
+        if: "!cancelled()"
+        run: |
+          echo "## PPU Linux Build" >> $GITHUB_STEP_SUMMARY
+          echo "- Image: \`${IMAGE_NAME}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Arch list: \`${CUDA_ARCH_LIST}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Commit: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "- Status: Passed" >> $GITHUB_STEP_SUMMARY
+            for whl in dist/*.whl; do
+              [ -e "$whl" ] && echo "- Wheel: \`$(basename "$whl")\`" >> $GITHUB_STEP_SUMMARY
+            done
+          else
+            echo "- Status: Failed" >> $GITHUB_STEP_SUMMARY
+          fi

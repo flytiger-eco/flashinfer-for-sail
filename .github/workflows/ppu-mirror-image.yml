@@ -1,0 +1,111 @@
+# Mirror the PPU build image into GHCR.
+#
+# Pulling the vendor image from pkg.flytiger-eco.com on every build is slow, so
+# it is copied once into ghcr.io, which sits on the same network as the runners.
+# ppu-linux-build.yml then pulls from GHCR.
+#
+# Run this manually whenever the vendor image tag changes.
+#
+# Triggering model: contributions arrive as PRs from forks, and a fork PR only
+# ever gets a read-only GITHUB_TOKEN, so the PR's own run can never push to
+# GHCR. The mirror therefore runs in this repository instead:
+#   - on push to the default branch when this file changes, i.e. right after
+#     such a PR is merged, where the token does have packages: write
+#   - on demand from the Actions UI, to re-mirror a new vendor tag
+#
+# The copy is done with skopeo, which streams blobs registry-to-registry: there
+# is no `docker pull` and no filesystem extraction, so a 20-30GB image needs
+# almost no local disk on the runner.
+
+name: PPU Mirror Image
+
+on:
+  # Deliberately narrow: only re-mirror when this workflow itself changes, so
+  # ordinary merges never kick off a multi-GB copy.
+  push:
+    branches: [v0.6.12]
+    paths:
+      - '.github/workflows/ppu-mirror-image.yml'
+  workflow_dispatch:
+    inputs:
+      source_image:
+        description: 'Source image to mirror (registry/repo:tag)'
+        type: string
+        default: pkg.flytiger-eco.com/docker_release/llm:v2.1.1-pytorch2.11.0-ubuntu24.04-cuda13.0-sglang0.5.13-py312
+      dest_tag:
+        description: 'Tag to publish under ghcr.io/<owner>/flashinfer-ppu-build'
+        type: string
+        default: v2.1.1-pytorch2.11.0-ubuntu24.04-cuda13.0-sglang0.5.13-py312
+
+concurrency:
+  group: ppu-mirror-image
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  SKOPEO_IMAGE: quay.io/skopeo/stable:latest
+  # The inputs context is empty on pull_request, so fall back to the defaults.
+  SOURCE_IMAGE: ${{ inputs.source_image || 'pkg.flytiger-eco.com/docker_release/llm:v2.1.1-pytorch2.11.0-ubuntu24.04-cuda13.0-sglang0.5.13-py312' }}
+  DEST_TAG: ${{ inputs.dest_tag || 'v2.1.1-pytorch2.11.0-ubuntu24.04-cuda13.0-sglang0.5.13-py312' }}
+
+jobs:
+  mirror:
+    name: Mirror to GHCR
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      # GHCR rejects uppercase in image references; owner names may contain it.
+      - name: Resolve target reference
+        id: ref
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          owner=$(echo "${OWNER}" | tr '[:upper:]' '[:lower:]')
+          echo "target=ghcr.io/${owner}/flashinfer-ppu-build:${DEST_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Source: ${SOURCE_IMAGE}"
+          echo "Target: ghcr.io/${owner}/flashinfer-ppu-build:${DEST_TAG}"
+
+      - name: Copy image to GHCR
+        env:
+          TARGET_IMAGE: ${{ steps.ref.outputs.target }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Only the linux/amd64 image is copied — the build job runs on x64.
+          docker run --rm \
+            -e GHCR_USER -e GHCR_TOKEN \
+            "${SKOPEO_IMAGE}" copy \
+              --override-arch amd64 --override-os linux \
+              --dest-creds "${GHCR_USER}:${GHCR_TOKEN}" \
+              "docker://${SOURCE_IMAGE}" \
+              "docker://${TARGET_IMAGE}"
+
+      - name: Verify published image
+        env:
+          TARGET_IMAGE: ${{ steps.ref.outputs.target }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          docker run --rm "${SKOPEO_IMAGE}" inspect \
+            --creds "${GHCR_USER}:${GHCR_TOKEN}" \
+            "docker://${TARGET_IMAGE}" \
+            --format '{{.Digest}} {{.Architecture}}/{{.Os}}'
+
+      - name: Summary
+        if: "!cancelled()"
+        env:
+          TARGET_IMAGE: ${{ steps.ref.outputs.target }}
+        run: |
+          echo "## PPU Mirror Image" >> $GITHUB_STEP_SUMMARY
+          echo "- Source: \`${SOURCE_IMAGE}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Target: \`${TARGET_IMAGE}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Status: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "First-time setup: a newly created GHCR package is private." >> $GITHUB_STEP_SUMMARY
+            echo "To let builds pull it anonymously, open the package page and set" >> $GITHUB_STEP_SUMMARY
+            echo "Package settings -> Danger Zone -> Change visibility -> Public." >> $GITHUB_STEP_SUMMARY
+          fi
