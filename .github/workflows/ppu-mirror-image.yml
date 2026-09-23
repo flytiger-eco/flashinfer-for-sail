@@ -1,27 +1,7 @@
-# Mirror the PPU build image into GHCR.
-#
-# Pulling the vendor image from pkg.flytiger-eco.com on every build is slow, so
-# it is copied once into ghcr.io, which sits on the same network as the runners.
-# ppu-linux-build.yml then pulls from GHCR.
-#
-# Run this manually whenever the vendor image tag changes.
-#
-# Triggering model: contributions arrive as PRs from forks, and a fork PR only
-# ever gets a read-only GITHUB_TOKEN, so the PR's own run can never push to
-# GHCR. The mirror therefore runs in this repository instead:
-#   - on push to the default branch when this file changes, i.e. right after
-#     such a PR is merged, where the token does have packages: write
-#   - on demand from the Actions UI, to re-mirror a new vendor tag
-#
-# The copy is done with skopeo, which streams blobs registry-to-registry: there
-# is no `docker pull` and no filesystem extraction, so a 20-30GB image needs
-# almost no local disk on the runner.
 
 name: PPU Mirror Image
 
 on:
-  # Deliberately narrow: only re-mirror when this workflow itself changes, so
-  # ordinary merges never kick off a multi-GB copy.
   push:
     branches: [v0.6.12]
     paths:
@@ -47,7 +27,6 @@ permissions:
 
 env:
   SKOPEO_IMAGE: quay.io/skopeo/stable:latest
-  # The inputs context is empty on pull_request, so fall back to the defaults.
   SOURCE_IMAGE: ${{ inputs.source_image || 'pkg.flytiger-eco.com/docker_release/llm:v2.1.1-pytorch2.11.0-ubuntu24.04-cuda13.0-sglang0.5.13-py312' }}
   DEST_TAG: ${{ inputs.dest_tag || 'v2.1.1-pytorch2.11.0-ubuntu24.04-cuda13.0-sglang0.5.13-py312' }}
 
@@ -57,7 +36,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
-      # GHCR rejects uppercase in image references; owner names may contain it.
       - name: Resolve target reference
         id: ref
         env:

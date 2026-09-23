@@ -1,21 +1,3 @@
-# PPU build pipeline.
-# Compiles flashinfer-for-sail (AOT) inside the PPU build container and
-# produces an installable wheel.
-#
-# Stages:
-#   1. Pull the build image
-#   2. Start the container (ci/bash.sh, workspace mounted at /workspace)
-#   3. Provide the source tree (actions/checkout + submodules, mounted in)
-#   4. Install build dependencies (inside container)
-#   5. AOT compile, build the wheel, install and verify it (inside container)
-#
-# Triggered on push / PR to v0.6.12 and manually via workflow_dispatch.
-# The code under test is the current checkout (not a fixed clone), so PRs
-# validate their own changes.
-#
-# The build image is pulled from GHCR, which is on the same network as the
-# runners. Mirror a new vendor image tag there with ppu-mirror-image.yml first.
-
 name: PPU Linux Build
 
 on:
@@ -56,16 +38,9 @@ permissions:
   packages: read
 
 env:
-  # Mirrored from pkg.flytiger-eco.com by ppu-mirror-image.yml. Pulling the
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/flashinfer-ppu-build:v2.1.1-pytorch2.11.0-ubuntu24.04-cuda13.0-sglang0.5.13-py312
   CUDA_ARCH_LIST: ${{ github.event.inputs.cuda_arch_list || '8.0' }}
-  # Per-compile-job memory budget used to derive MAX_JOBS. A standard hosted
-  # runner has 2 cores and ~7GB RAM, so 3GB/job lets both cores stay busy
-  # without inviting the OOM killer. Raise it if nvcc gets killed.
   AOT_MAX_JOBS_MEMORY_GB: '3'
-  # ccache directory on the runner, mounted into the container at
-  # /workspace/.ccache. Restored from the cache warmed by ppu-ccache-warm.yml so
-  # PR builds compile incrementally instead of from scratch.
   CCACHE_DIR_HOST: ${{ github.workspace }}/.ccache
   CCACHE_MAXSIZE: '5G'
 
@@ -101,13 +76,6 @@ jobs:
             echo "Enough free space, skipping preinstalled SDK cleanup"
           fi
 
-      # Stage 1: pull the build image from GHCR.
-      # ci/bash.sh pulls again right before `docker run`, but that is a cached
-      # no-op. Pulling here keeps registry/network failures visible as their own
-      # step instead of being buried in the build log.
-      #
-      # Logging in is not required while the package is public, but keeps this
-      # working if its visibility is ever flipped back to private.
       - name: Pull Image
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" \
@@ -119,7 +87,6 @@ jobs:
           docker images "${IMAGE_NAME}"
           df -h /
 
-      # Stage 3: the source tree the container will compile (mounted, not cloned).
       - uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -135,9 +102,6 @@ jobs:
           free -h
           nvidia-smi 2>/dev/null || echo "no gpu on build node"
 
-      # Restore the ccache warmed on the base branch by ppu-ccache-warm.yml.
-      # Restore-only: PR builds consume the cache but do not write it back (the
-      # warm workflow owns saving). A miss just means a full compile.
       - name: Restore ccache
         uses: actions/cache/restore@v4
         with:
@@ -146,8 +110,6 @@ jobs:
           restore-keys: |
             ppu-ccache-${{ runner.os }}-arch${{ env.CUDA_ARCH_LIST }}-
 
-      # Stages 2, 4, 5: start the container on the checked-out tree, then install
-      # dependencies and build the wheel via scripts/task_ppu_build_wheel.sh.
       - name: Build Wheel
         run: |
           bash ci/bash.sh "${IMAGE_NAME}" \

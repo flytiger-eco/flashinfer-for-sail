@@ -4,8 +4,8 @@
 name: PR Label Cleanup
 
 on:
-  pull_request:
-    types: [synchronize]  # New commits pushed
+  push:
+    branches: [main]
 
 permissions:
   pull-requests: write
