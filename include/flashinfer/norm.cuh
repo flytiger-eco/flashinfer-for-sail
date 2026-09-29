@@ -479,7 +479,7 @@ cudaError_t RMSNorm(T* input, T* weight, T* output, uint32_t batch_size, uint32_
 
     // --- Persistent kernel path (highest priority) ---
     bool used_persistent = false;
-    if (num_warps + NUM_HELPER_WARPS <= 32 && rounds <= 1) {
+    if (num_warps >= NUM_HELPER_WARPS && num_warps + NUM_HELPER_WARPS <= 32 && rounds <= 1) {
       const uint32_t num_warps_total = num_warps + NUM_HELPER_WARPS;
       // Compute persistent kernel smem size:
       //   float region: (num_warps + 1) floats for warp_sums + rms_rcp, 16-byte aligned
