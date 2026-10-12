@@ -5,7 +5,6 @@
   </picture>
 </p>
 <h1 align="center">
-High-Performance GPU Kernels for Inference
 </h1>
 
 <p align="center">
@@ -15,14 +14,15 @@ High-Performance GPU Kernels for Inference
 [![Build Status](https://ci.tlcpack.ai/job/flashinfer-ci/job/main/badge/icon)](https://ci.tlcpack.ai/job/flashinfer-ci/job/main/)
 [![Documentation](https://github.com/flashinfer-ai/flashinfer/actions/workflows/build-doc.yml/badge.svg)](https://github.com/flashinfer-ai/flashinfer/actions/workflows/build-doc.yml)
 
-**FlashInfer** is a library and kernel generator for inference that delivers state-of-the-art performance across diverse GPU architectures. It provides unified APIs for attention, GEMM, and MoE operations with multiple backend implementations including FlashAttention-2/3, cuDNN, CUTLASS, and TensorRT-LLM.
+**FlashInfer-for-SAIL** is a PPU-adapted kernel library and generator based on FlashInfer v0.6.12. It provides runtime dependency, backend kernel, and build workflow adaptations for T-Head AI accelerator chips. It keeps FlashInfer's high-performance kernel generation capabilities and integrates PPU platform optimizations for running large language models and multimodal models on PPU devices.
+
+This document only covers the basic installation, verification, and usage workflow. For Attention Backend, JIT/AOT build tuning, known issues, and model-specific instructions, see the FlashInfer-for-SAIL User Guide.
 
 ## Why FlashInfer?
 
 - **State-of-the-art Performance**: Optimized kernels for prefill, decode, and mixed batching scenarios
 - **Multiple Backends**: Automatically selects the best backend for your hardware and workload
-- **Modern Architecture Support**: Support for SM75 (Turing) and later (through Blackwell)
-- **Low-Precision Compute**: FP8 and FP4 quantization for attention, GEMM, and MoE operations
+- **Modern Architecture Support**: Support for ppu001/ppu0015
 - **Production-Ready**: CUDAGraph and torch.compile compatible for low-latency serving
 
 ## Core Features
@@ -35,81 +35,58 @@ High-Performance GPU Kernels for Inference
 - **Sparse Attention**: Block-sparse and variable block-sparse patterns
 - **POD-Attention**: Fused prefill+decode for mixed batching
 
-### GEMM & Linear Operations
-- **BF16 GEMM**: BF16 matrix multiplication for SM10.0+ GPUs.
-- **FP8 GEMM**: Per-tensor and groupwise scaling
-- **FP4 GEMM**: NVFP4 and MXFP4 matrix multiplication for Blackwell GPUs
-- **Grouped GEMM**: Efficient batched matrix operations for LoRA and multi-expert routing
-
-### Mixture of Experts (MoE)
-- **Fused MoE Kernels**
-- **Multiple Routing Methods**: DeepSeek-V3, Llama-4, and standard top-k routing
-- **Quantized MoE**: FP8 and FP4 expert weights with block-wise scaling
-
 ### Sampling & Decoding
 - **Sorting-Free Sampling**: Efficient Top-K, Top-P, and Min-P without sorting
 - **Speculative Decoding**: Chain speculative sampling support
-
-### Communication
-- **AllReduce**: Custom implementations
-- **Multi-Node NVLink**: MNNVL support for multi-node inference
-- **NVSHMEM Integration**: For distributed memory operations
 
 ### Other Operators
 - **RoPE**: LLaMA-style rotary position embeddings (including LLaMA 3.1)
 - **Normalization**: RMSNorm, LayerNorm, Gemma-style fused operations
 - **Activations**: SiLU, GELU with fused gating
 
-## GPU Support
+## PPU Support
 
-| Architecture | Compute Capability | Example GPUs |
-|--------------|-------------------|------|
-| Turing | SM 7.5 | T4, RTX 20 series |
-| Ampere | SM 8.0, 8.6 | A100, A10, RTX 30 series |
-| Ada Lovelace | SM 8.9 | L4, L40, RTX 40 series |
-| Hopper | SM 9.0 | H100, H200 |
-| Blackwell | SM 10.0, 10.3 | B200, B300 |
-| Blackwell | SM 11.0 | Jetson Thor |
-| Blackwell | SM 12.0, 12.1 | RTX 50 series, DGX Spark |
+| Hardware | Architecture |
+|--------------|-------------------|
+| ZhenWu 810e | ppu001 |
+| ZhenWu M890 | ppu0015 |
 
 > **Note:** Not all features are supported across all compute capabilities.
 
-## News
-
-Latest: [![GitHub Release](https://img.shields.io/github/v/release/flashinfer-ai/flashinfer)](https://github.com/flashinfer-ai/flashinfer/releases/latest)
-
-Notable updates:
-- [2025-10-08] Blackwell support added in [v0.4.0](https://github.com/flashinfer-ai/flashinfer/releases/tag/v0.4.0)
-- [2025-03-10] [Blog Post](https://flashinfer.ai/2025/03/10/sampling.html) Sorting-Free GPU Kernels for LLM Sampling, which explains the design of sampling kernels in FlashInfer.
-
 ## Getting Started
+
+## Requirements
+
+Before installing Flashinfer-for-SAIL v0.6.12, make sure the SAIL SDK and required runtime components are available in your environment.
+
+- SAIL SDK v2.1.1 or later
+- Python 3.12
+- PyTorch-for-SAIL 2.10.0 or later
+
+For supported operating systems, CUDA Wrapper versions, and the full dependency list, see the Flashinfer-for-SAIL User Guide.
 
 ### Installation
 
 **Quickstart:**
 
-```bash
-pip install flashinfer-python
-```
+### Option 1: Use the Docker Image (Recommended)
 
-**Package Options:**
+FlashInfer-for-SAIL is pre-installed in the matching SGLang-for-SAIL v0.5.13 Docker image, so no extra installation is required. Using this image is recommended because it avoids manual setup of the base runtime environment.
+
+Once inside the container, skip to [Verify Installation](#verify-installation).
+
+### Option 2: Install from PyPI
+
+```bash
+pip install flashinfer-python -i https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple
+```
 
 - **flashinfer-python**: Core package that compiles/downloads kernels on first use
-- **flashinfer-cubin**: Pre-compiled kernel binaries for all supported GPU architectures
-- **flashinfer-jit-cache**: Pre-built kernel cache for specific CUDA versions
 
-**For faster initialization and offline usage**, install the optional packages to have most kernels pre-compiled:
+**For faster initialization and offline usage**, install the optional packages:
 
 ```bash
-pip install flashinfer-python flashinfer-cubin
-# JIT cache (replace cu129 with your CUDA version)
-pip install flashinfer-jit-cache --index-url https://flashinfer.ai/whl/cu129
-```
-
-**For Blackwell (SM100+) CuTe DSL kernels**, install with the CUDA 13 extra to enable Blackwell-optimized kernels:
-
-```bash
-pip install flashinfer-python[cu13]
+pip install flashinfer-python -i https://pkg.flytiger-eco.com/artifactory/api/pypi/pypi_index/simple  --no-deps --force
 ```
 
 ### Verify Installation
@@ -137,8 +114,8 @@ See [documentation](https://docs.flashinfer.ai/) for comprehensive API reference
 ### Install from Source
 
 ```bash
-git clone https://github.com/flashinfer-ai/flashinfer.git --recursive
-cd flashinfer
+git clone https://github.com/flytiger-eco/flashinfer-for-sail.git -b v0.6.12 --recursive
+cd flashinfer-for-sail
 python -m pip install -v .
 ```
 
@@ -163,24 +140,14 @@ python -m pip install dist/*.whl
 ```
 
 ```bash
-# flashinfer-jit-cache (customize for your target GPUs)
-export FLASHINFER_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a 10.0a 10.3a 11.0a 12.0f"
+# flashinfer-jit-cache (customize for your target PPUs)
+export FLASHINFER_CUDA_ARCH_LIST="8.0 8.9"
 cd flashinfer-jit-cache
 python -m build --no-isolation --wheel
 python -m pip install dist/*.whl
 ```
 
 For more details, see the [Install from Source documentation](https://docs.flashinfer.ai/installation.html#install-from-source).
-
-### Nightly Builds
-
-```bash
-pip install -U --pre flashinfer-python --index-url https://flashinfer.ai/whl/nightly/ --no-deps
-pip install flashinfer-python  # Install dependencies from PyPI
-pip install -U --pre flashinfer-cubin --index-url https://flashinfer.ai/whl/nightly/
-# JIT cache (replace cu129 with your CUDA version)
-pip install -U --pre flashinfer-jit-cache --index-url https://flashinfer.ai/whl/nightly/cu129
-```
 
 ### CLI Tools
 
@@ -221,25 +188,6 @@ For detailed information about logging levels, configuration, and advanced featu
 ## Custom Attention Variants
 
 Users can customize their own attention variants with additional parameters. For more details, refer to our [JIT examples](https://github.com/flashinfer-ai/flashinfer/blob/main/tests/utils/test_jit_example.py).
-
-## CUDA Support
-
-**Supported CUDA Versions:** 12.6, 12.8, 13.0, 13.1
-
-> **Note:** FlashInfer strives to follow PyTorch's supported CUDA versions plus the latest CUDA release.
-
-## Adoption
-
-FlashInfer powers inference in:
-
-- [SGLang](https://github.com/sgl-project/sglang)
-- [vLLM](https://github.com/vllm-project/vllm)
-- [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM)
-- [TGI (Text Generation Inference)](https://github.com/huggingface/text-generation-inference)
-- [MLC-LLM](https://github.com/mlc-ai/mlc-llm)
-- [LightLLM](https://github.com/ModelTC/lightllm)
-- [lorax](https://github.com/predibase/lorax)
-- [ScaleLLM](https://github.com/vectorch-ai/ScaleLLM)
 
 ## Acknowledgement
 
