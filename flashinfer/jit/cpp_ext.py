@@ -15,6 +15,7 @@ import tvm_ffi
 import torch
 
 from . import env as jit_env
+from . import sailify_staging
 from ..compilation_context import CompilationContext
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,12 @@ def _get_glibcxx_abi_build_flags() -> List[str]:
 
 @functools.cache
 def get_cuda_path() -> str:
+    # cuda-free (PPU): the only toolkit is the PPU SDK. This must win over
+    # CUDA_HOME/`which nvcc` so ninja's $cuda_home always points at the
+    # native PPU toolchain and headers.
+    ppu_root = sailify_staging.ppu_sdk_root()
+    if ppu_root:
+        return ppu_root
     cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
     if cuda_home is not None:
         return cuda_home
@@ -59,7 +66,9 @@ def get_cuda_path() -> str:
         cuda_home = "/usr/local/cuda"  # This default value is from: https://github.com/pytorch/pytorch/blob/ceb11a584d6b3fdc600358577d9bf2644f88def9/torch/utils/cpp_extension.py#L115
         if not os.path.exists(cuda_home):
             raise RuntimeError(
-                f"Could not find nvcc and default {cuda_home=} doesn't exist"
+                f"Could not find CUDA nvcc or PPU hgcc and default "
+                f"{cuda_home=} doesn't exist. Source the PPU SDK envsetup.sh "
+                "or set PPU_SDK_ROOT/PPU_PATH for cuda-free builds."
             )
     return cuda_home
 
@@ -130,16 +139,34 @@ def join_multiline(vs: List[str]) -> str:
 
 def get_cccl_includes() -> List:
     """Get vendored CCCL include directories (added with -I for CTK override precedence)."""
+    if sailify_staging.ppu_sdk_root():
+        # PPU_SDK provides native cub/libcudacxx/thrust under its include
+        # tree. Dropping the vendored NVIDIA CCCL override lets sailify's
+        # cuda/std -> hggc/std conversion resolve against those headers.
+        return []
     return [p.resolve() for p in jit_env.CCCL_INCLUDE_DIRS]
 
 
 def get_system_includes(cuda_home: str) -> List:
     """Get list of system include directories."""
+    tvm_ffi_include = tvm_ffi.libinfo.find_include_path()
+    tvm_ffi_dlpack_include = tvm_ffi.libinfo.find_dlpack_include_path()
     system_includes = [
         sysconfig.get_path("include"),
         "$cuda_home/include",
-        tvm_ffi.libinfo.find_include_path(),
-        tvm_ffi.libinfo.find_dlpack_include_path(),
+    ]
+    if sailify_staging.ppu_sdk_root():
+        # Stock tvm-ffi wheels carry the CUDA vocabulary in
+        # tvm/ffi/extra/cuda/* (cuda_runtime.h include, cuda* calls), which
+        # has no resolution under a pure PPU toolchain. Stage a sailified
+        # copy of the installed header trees ahead of the originals so the
+        # converted headers shadow them — stock tvm-ffi and partially
+        # converted tvm-ffi-sail installs then use the same build path.
+        system_includes += sailify_staging.stage_tvm_ffi_includes(
+            tvm_ffi_include, tvm_ffi_dlpack_include
+        )
+    system_includes += [tvm_ffi_include, tvm_ffi_dlpack_include]
+    system_includes += [
         jit_env.FLASHINFER_INCLUDE_DIR.resolve(),
         jit_env.FLASHINFER_CSRC_DIR.resolve(),
     ]
@@ -190,6 +217,10 @@ def build_cflags(
     ]
     if extra_cflags is not None:
         cflags += extra_cflags
+
+    # cuda-free (PPU): pull the sailify compat wrapper into every host TU
+    if sailify_staging.ppu_sdk_root():
+        cflags += ["-include compatible_wrapper.h"]
 
     env_extra_cflags = parse_env_flags("FLASHINFER_EXTRA_CFLAGS")
     if env_extra_cflags is not None:
@@ -242,11 +273,150 @@ def build_cuda_cflags(
         # No module flags, use global flags
         cuda_cflags += global_flags
 
+    # cuda-free (PPU): the native hggc headers (hggc_runtime_api.h etc.)
+    # and the compat wrapper; the staged .ppu_compat dir already precedes
+    # these via extra_include_dirs, so its shims keep precedence.
+    ppu_root = sailify_staging.ppu_sdk_root()
+    if ppu_root:
+        cuda_cflags += [
+            f"-I{ppu_root}/include",
+            "-include compatible_wrapper.h",
+            # tvm-ffi (PPU build, tvm-ffi-sail) gates its hggc runtime face
+            # (<hggc_runtime.h>) behind this macro instead of
+            # <cuda_runtime.h>; the compat bridge would cover the latter,
+            # but the native face keeps tvm-ffi on the PPU path.
+            "-DTVM_FFI_CUBIN_LAUNCHER_USE_PPU",
+        ]
+
     env_extra_cuda_cflags = parse_env_flags("FLASHINFER_EXTRA_CUDAFLAGS")
     if env_extra_cuda_cflags is not None:
         cuda_cflags += env_extra_cuda_cflags
 
+    # hgcc consumes the PPU-native option vocabulary. Keep module flag
+    # producers CUDA-compatible and translate only at the toolchain boundary.
+    if ppu_root:
+        cuda_cflags = _convert_nvcc_flags_to_hgcc(cuda_cflags)
+
     return cuda_cflags
+
+
+@functools.cache
+def _hgcc_flag_converter():
+    """Build a converter from sailify's canonical nvcc-to-hgcc option table."""
+    try:
+        NVCC_HGCC_OPTIONS = sailify_staging.import_sailify(
+            "nvcc_hgcc_options"
+        ).NVCC_HGCC_OPTIONS
+    except ImportError:
+        logger.warning(
+            "sailify.nvcc_hgcc_options unavailable; passing nvcc flags to hgcc"
+        )
+        return None
+
+    flag_map: dict = {}
+    for long_name, entry in NVCC_HGCC_OPTIONS.items():
+        flag_map[long_name] = entry
+        short = entry.get("short")
+        if short:
+            flag_map[short] = entry
+
+    def cuda_arch_to_ppu(arch: str) -> str:
+        if arch.startswith("ppu_"):
+            return arch
+        match = re.match(r"(\d+)\.(\d+)", arch.split("+")[0].rstrip("a"))
+        if match is None:
+            raise ValueError(f"Invalid CUDA architecture: {arch!r}")
+        major, minor = int(match.group(1)), int(match.group(2))
+        if major == 8 and minor in (0, 6):
+            return "ppu_10"
+        if (major == 8 and minor == 9) or major == 9:
+            return "ppu_15"
+        return "ppu_10"
+
+    def convert(flags: List[str]) -> List[str]:
+        result: List[str] = []
+        ppu_arches: List[str] = []
+        i = 0
+        while i < len(flags):
+            flag = flags[i]
+            opt, eq, val = flag.partition("=")
+            if opt in ("-gencode", "--gpu-code", "--gpu-architecture", "-arch"):
+                if eq:
+                    arch_val = val
+                elif i + 1 < len(flags):
+                    arch_val = flags[i + 1]
+                    i += 1
+                else:
+                    i += 1
+                    continue
+                if opt in ("-gencode", "--gpu-code"):
+                    match = re.search(r"(?:sm_|compute_)(\d+)(\d)", arch_val)
+                    if match is None:
+                        raise ValueError(f"Invalid gencode value: {arch_val!r}")
+                    arch_val = f"{match.group(1)}.{match.group(2)}"
+                else:
+                    match = re.match(r"(?:sm_|compute_)(\d+)(\d)", arch_val)
+                    if match is not None:
+                        arch_val = f"{match.group(1)}.{match.group(2)}"
+                ppu_arches.append(cuda_arch_to_ppu(arch_val))
+                i += 1
+                continue
+
+            entry = flag_map.get(opt)
+            if entry is None:
+                result.append(flag)
+                i += 1
+                continue
+            if entry.get("needs_ignore"):
+                if entry.get("needs_value") and not eq and i + 1 < len(flags):
+                    i += 2
+                else:
+                    i += 1
+                continue
+            mapped = entry.get("map_to")
+            if mapped is None:
+                result.append(flag)
+                i += 1
+                continue
+            mapped_list = mapped if isinstance(mapped, list) else [mapped]
+            if not entry.get("needs_value"):
+                result.extend(mapped_list)
+                i += 1
+                continue
+            if eq:
+                raw_value = val
+            elif i + 1 < len(flags):
+                raw_value = flags[i + 1]
+                i += 1
+            else:
+                raw_value = ""
+            value_map = entry.get("value_map")
+            if value_map and raw_value in value_map:
+                mapped_value = value_map[raw_value]
+                if isinstance(mapped_value, dict) and mapped_value.get("needs_ignore"):
+                    i += 1
+                    continue
+                result.extend(mapped_list)
+                result.append(str(mapped_value))
+            else:
+                result.extend(mapped_list)
+                if raw_value:
+                    result.append(raw_value)
+            i += 1
+
+        if ppu_arches:
+            result.append(
+                f"--gpu-architecture={','.join(dict.fromkeys(ppu_arches))}"
+            )
+        return result
+
+    return convert
+
+
+def _convert_nvcc_flags_to_hgcc(flags: List[str]) -> List[str]:
+    """Convert nvcc-style flags to hgcc flags when sailify is available."""
+    convert = _hgcc_flag_converter()
+    return flags if convert is None else convert(flags)
 
 
 def generate_ninja_build_for_op(
@@ -278,6 +448,17 @@ def generate_ninja_build_for_op(
         "-lcuda",
     ]
 
+    # cuda-free (PPU): hgcc emits only the hggc runtime ABI. Do not retain
+    # CUDA linker paths or libraries, which could resolve from ldconfig and
+    # silently reintroduce a CUDA-persona dependency.
+    ppu_root = sailify_staging.ppu_sdk_root()
+    if ppu_root:
+        ldflags = [
+            "-shared",
+            f"-L{ppu_root}/lib",
+            "-lhggcrt1",
+        ]
+
     env_extra_ldflags = parse_env_flags("FLASHINFER_EXTRA_LDFLAGS")
     if env_extra_ldflags is not None:
         ldflags += env_extra_ldflags
@@ -286,7 +467,10 @@ def generate_ninja_build_for_op(
         ldflags += extra_ldflags
 
     cxx = os.environ.get("CXX", "c++")
-    nvcc = os.environ.get("FLASHINFER_NVCC", "$cuda_home/bin/nvcc")
+    # The nvcc persona emits __cuda* registration symbols; native hgcc emits
+    # the __hggc* ABI provided by libhggcrt.
+    nvcc_default = "$cuda_home/bin/hgcc" if ppu_root else "$cuda_home/bin/nvcc"
+    nvcc = os.environ.get("FLASHINFER_NVCC", nvcc_default)
     # Compiler launchers (e.g., sccache, ccache) — empty string when unset
     cxx_launcher = os.environ.get("FLASHINFER_CXX_LAUNCHER", "")
     nvcc_launcher = os.environ.get("FLASHINFER_NVCC_LAUNCHER", "")
