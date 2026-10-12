@@ -21,7 +21,7 @@
 #include "../exception.h"
 #include "cutlass/kernel_hardware_info.h"
 
-// From 3rdparty/cutlass/examples/77_blackwell_fmha
+// From 3rdparty/actlize/examples/77_blackwell_fmha
 #include "blackwell/device/sm100_mla.hpp"
 #include "blackwell/kernel/sm100_mla_tile_scheduler.hpp"
 

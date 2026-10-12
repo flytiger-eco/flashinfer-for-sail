@@ -1,6 +1,6 @@
-[submodule "3rdparty/cutlass"]
-	path = 3rdparty/cutlass
-	url = https://github.com/NVIDIA/cutlass.git
+[submodule "3rdparty/actlize"]
+	path = 3rdparty/actlize
+	url = https://github.com/t-head/actlize.git
 [submodule "3rdparty/spdlog"]
 	path = 3rdparty/spdlog
 	url = https://github.com/gabime/spdlog.git
@@ -10,3 +10,6 @@
 [submodule "3rdparty/nixl"]
 	path = 3rdparty/nixl
 	url = https://github.com/ai-dynamo/nixl.git
+[submodule "3rdparty/sailify"]
+	path = 3rdparty/sailify
+	url = https://github.com/t-head/sailify.git

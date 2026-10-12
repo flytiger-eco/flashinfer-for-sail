@@ -129,8 +129,8 @@ def _no_pip_installs() -> bool:
     return os.environ.get("FLASHINFER_BUILD_NO_PIP") == "1"
 
 
-def _detect_cuda_release() -> tuple[int, int] | None:
-    """Best-effort detection of the CUDA major/minor release on the host."""
+def _detect_cuda_major() -> int:
+    """Best-effort detection of the CUDA major version on the host."""
     try:
         out = subprocess.check_output(["nvcc", "--version"]).decode()
         for line in out.splitlines():
@@ -594,6 +594,12 @@ def _ensure_nixl_wheel() -> None:
             "pre-install, so the pre-flight probe will skip NIXL-EP"
         )
         return
+    if _no_pip_installs():
+        print(
+            "[BUILD_NVEP] FLASHINFER_BUILD_NO_PIP=1; no NIXL wheel to "
+            "pre-install, so the pre-flight probe will skip NIXL-EP"
+        )
+        return
     cuda_major = _detect_cuda_major()
     wheel = f"nixl-cu{cuda_major}=={_NIXL_WHEEL_VERSION}"
     print(f"[BUILD_NVEP] pre-installing NIXL wheel --no-deps: {wheel}")
@@ -789,15 +795,6 @@ def _compile_deps_installed(specs) -> bool:
     return True
 
 
-def _system_cuda_tile_compiler_available() -> bool:
-    """Return whether CUDA 13.4+ provides an executable toolkit TileIRAS."""
-    release = _detect_cuda_release()
-    if release is None or release < (13, 4):
-        return False
-    compiler = Path("/usr/local/cuda/bin/tileiras")
-    return compiler.is_file() and os.access(compiler, os.X_OK)
-
-
 def _install_cuda_tile_compile_deps() -> None:
     """Install cuda-tile's compile chain with ``--no-deps`` to dodge libcudart.so.13.
 
@@ -836,14 +833,13 @@ def _install_cuda_tile_compile_deps() -> None:
     first time the user calls a cuTile kernel — a better failure mode than
     aborting the install entirely.
     """
-    if _system_cuda_tile_compiler_available():
-        print(
-            "[BUILD] using system cuda-tile compiler; skipping pip compile deps",
-            flush=True,
-        )
-        return
-
-    wheels = get_cuda_tile_compile_dependency_requirements()
+    wheels = [
+        "nvidia-cuda-nvcc<13.4,>=13.2",
+        "nvidia-cuda-tileiras<13.4,>=13.2",
+        "nvidia-nvvm<13.4,>=13.2",
+        "nvidia-nvjitlink<14,>=13.3",
+        "nvidia-cuda-crt<13.4,>=13.2",
+    ]
 
     if _compile_deps_installed(wheels):
         print("[BUILD] cuda-tile compile deps already installed; skipping", flush=True)
@@ -1107,9 +1103,10 @@ def _create_data_dir(use_symlinks=True):
             if src.exists():
                 shutil.copytree(src, dst, symlinks=False, dirs_exist_ok=True)
 
-    ln("3rdparty/cutlass", "cutlass")
+    ln("3rdparty/actlize", "cutlass")
     ln("3rdparty/spdlog", "spdlog")
     ln("3rdparty/cccl", "cccl")
+    ln("3rdparty/sailify", "sailify")
     ln("csrc", "csrc")
     ln("include", "include")
 

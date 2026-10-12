@@ -87,7 +87,7 @@ def _run_flashinfer_command(command: str) -> str:
         print(f"=== Generated _build_meta.py with version {version} ===")
 
     # Initialize submodules (since .git is not fully mounted)
-    if not os.path.exists("3rdparty/cutlass/include"):
+    if not os.path.exists("3rdparty/actlize/include"):
         print("=== Downloading CUTLASS ===")
         subprocess.run(
             [
@@ -95,7 +95,7 @@ def _run_flashinfer_command(command: str) -> str:
                 "clone",
                 "--depth=1",
                 "https://github.com/NVIDIA/cutlass.git",
-                "3rdparty/cutlass",
+                "3rdparty/actlize",
             ],
             check=True,
         )

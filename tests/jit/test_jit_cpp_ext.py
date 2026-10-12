@@ -5,6 +5,7 @@ import pytest
 import torch
 
 import flashinfer
+import flashinfer._ppu_env as ppu_env
 from flashinfer.jit import core, cpp_ext
 from flashinfer.jit.attention import modules as attention_modules
 from flashinfer.utils import (
@@ -13,6 +14,135 @@ from flashinfer.utils import (
     is_fa3_prefill_head_dim_supported,
 )
 from tests.test_helpers import jit_utils
+
+
+def test_ppu_sdk_root_detects_canonical_ci_install(monkeypatch):
+    for name in (
+        "FLASHINFER_JIT_SAILIFY",
+        "PPU_SDK_ROOT",
+        "PPU_PATH",
+        "PPU_SDK",
+        "FLASHINFER_NVCC",
+        "CUDA_SDK",
+        "CUDA_HOME",
+        "CUDA_PATH",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(ppu_env.shutil, "which", lambda name: None)
+    monkeypatch.setattr(
+        ppu_env.os.path,
+        "isfile",
+        lambda path: path == "/usr/local/PPU_SDK/bin/hgcc",
+    )
+    monkeypatch.setattr(ppu_env.os, "access", lambda path, mode: True)
+
+    assert ppu_env.ppu_sdk_root() == "/usr/local/PPU_SDK"
+
+
+def test_ppu_sdk_root_uses_envsetup_ppu_path(monkeypatch, tmp_path):
+    for name in (
+        "FLASHINFER_JIT_SAILIFY",
+        "PPU_SDK_ROOT",
+        "PPU_SDK",
+        "FLASHINFER_NVCC",
+        "CUDA_SDK",
+        "CUDA_HOME",
+        "CUDA_PATH",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("PPU_PATH", str(tmp_path))
+
+    assert ppu_env.ppu_sdk_root() == str(tmp_path)
+
+
+def test_ppu_sdk_root_detects_hgcc_on_path(monkeypatch):
+    for name in (
+        "FLASHINFER_JIT_SAILIFY",
+        "PPU_SDK_ROOT",
+        "PPU_PATH",
+        "PPU_SDK",
+        "FLASHINFER_NVCC",
+        "CUDA_SDK",
+        "CUDA_HOME",
+        "CUDA_PATH",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(
+        ppu_env.shutil,
+        "which",
+        lambda name: "/opt/ppu/bin/hgcc" if name == "hgcc" else None,
+    )
+    monkeypatch.setattr(ppu_env.os.path, "isfile", lambda path: True)
+    monkeypatch.setattr(ppu_env.os, "access", lambda path, mode: True)
+
+    assert ppu_env.ppu_sdk_root() == "/opt/ppu"
+
+
+def test_ppu_sdk_root_normalizes_hgcc_compatibility_persona(monkeypatch):
+    for name in (
+        "FLASHINFER_JIT_SAILIFY",
+        "PPU_SDK_ROOT",
+        "PPU_PATH",
+        "PPU_SDK",
+        "FLASHINFER_NVCC",
+        "CUDA_SDK",
+        "CUDA_HOME",
+        "CUDA_PATH",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    compilers = {
+        "hgcc": "/opt/ppu/CUDA_SDK/bin/hgcc",
+        "nvcc": "/opt/ppu/CUDA_SDK/bin/nvcc",
+    }
+    monkeypatch.setattr(ppu_env.shutil, "which", compilers.get)
+    monkeypatch.setattr(ppu_env.os.path, "isfile", lambda path: True)
+    monkeypatch.setattr(ppu_env.os, "access", lambda path, mode: True)
+
+    assert ppu_env.ppu_sdk_root() == "/opt/ppu"
+
+
+def test_ppu_sdk_root_detects_ppu_nvcc_persona(monkeypatch):
+    for name in (
+        "FLASHINFER_JIT_SAILIFY",
+        "PPU_SDK_ROOT",
+        "PPU_PATH",
+        "PPU_SDK",
+        "FLASHINFER_NVCC",
+        "CUDA_SDK",
+        "CUDA_HOME",
+        "CUDA_PATH",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(
+        ppu_env.shutil,
+        "which",
+        lambda name: "/usr/local/PPU_SDK/CUDA_SDK/bin/nvcc",
+    )
+    monkeypatch.setattr(ppu_env.os.path, "isfile", lambda path: True)
+    monkeypatch.setattr(ppu_env.os, "access", lambda path, mode: True)
+
+    assert ppu_env.ppu_sdk_root() == "/usr/local/PPU_SDK"
+
+
+def test_ppu_sdk_root_preserves_cuda_when_nvcc_is_available(monkeypatch):
+    for name in (
+        "FLASHINFER_JIT_SAILIFY",
+        "PPU_SDK_ROOT",
+        "PPU_PATH",
+        "PPU_SDK",
+        "FLASHINFER_NVCC",
+        "CUDA_SDK",
+        "CUDA_HOME",
+        "CUDA_PATH",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(
+        ppu_env.shutil, "which", lambda name: "/opt/nvidia/cuda/bin/nvcc"
+    )
+    monkeypatch.setattr(ppu_env.os.path, "isfile", lambda path: True)
+    monkeypatch.setattr(ppu_env.os, "access", lambda path, mode: True)
+
+    assert ppu_env.ppu_sdk_root() is None
 
 
 def test_nvcc_parallelism_flags_use_flashinfer_nvcc_threads(monkeypatch):
