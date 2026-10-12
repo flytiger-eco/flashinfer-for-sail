@@ -14,7 +14,7 @@
 [![Build Status](https://ci.tlcpack.ai/job/flashinfer-ci/job/main/badge/icon)](https://ci.tlcpack.ai/job/flashinfer-ci/job/main/)
 [![Documentation](https://github.com/flashinfer-ai/flashinfer/actions/workflows/build-doc.yml/badge.svg)](https://github.com/flashinfer-ai/flashinfer/actions/workflows/build-doc.yml)
 
-**FlashInfer-for-SAIL** is a PPU-adapted kernel library and generator based on FlashInfer v0.6.12. It provides runtime dependency, backend kernel, and build workflow adaptations for T-Head AI accelerator chips. It keeps FlashInfer's high-performance kernel generation capabilities and integrates PPU platform optimizations for running large language models and multimodal models on PPU devices.
+**FlashInfer-for-SAIL** is a PPU-adapted kernel library and generator based on FlashInfer v0.6.17. It provides runtime dependency, backend kernel, and build workflow adaptations for T-Head AI accelerator chips. It keeps FlashInfer's high-performance kernel generation capabilities and integrates PPU platform optimizations for running large language models and multimodal models on PPU devices.
 
 This document only covers the basic installation, verification, and usage workflow. For Attention Backend, JIT/AOT build tuning, known issues, and model-specific instructions, see the FlashInfer-for-SAIL User Guide.
 
@@ -57,9 +57,9 @@ This document only covers the basic installation, verification, and usage workfl
 
 ## Requirements
 
-Before installing Flashinfer-for-SAIL v0.6.12, make sure the SAIL SDK and required runtime components are available in your environment.
+Before installing Flashinfer-for-SAIL v0.6.17, make sure the SAIL SDK and required runtime components are available in your environment.
 
-- SAIL SDK v2.1.1 or later
+- SAIL SDK v2.2.0 or later
 - Python 3.12
 - PyTorch-for-SAIL 2.10.0 or later
 
@@ -114,7 +114,7 @@ See [documentation](https://docs.flashinfer.ai/) for comprehensive API reference
 ### Install from Source
 
 ```bash
-git clone https://github.com/flytiger-eco/flashinfer-for-sail.git -b v0.6.12 --recursive
+git clone https://github.com/flytiger-eco/flashinfer-for-sail.git -b v0.6.17 --recursive
 cd flashinfer-for-sail
 python -m pip install -v .
 ```
