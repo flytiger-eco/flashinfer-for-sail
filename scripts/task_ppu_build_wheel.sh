@@ -16,4 +16,7 @@ cd "${ROOT_DIR}/flashinfer-cubin"
 python -m build --no-isolation --wheel
 python -m pip install dist/*.whl
 
+cd "${ROOT_DIR}"
+python -m pip install -v .
+
 python -c "import flashinfer; print('flashinfer', flashinfer.__version__)"
