@@ -3,6 +3,8 @@ set -eu
 
 cd "${PPU_SOURCE_DIR:-/workspace/source}"
 
+export PYTHONPATH="${PPU_SOURCE_DIR:-/workspace/source}:${PYTHONPATH:-}"
+
 echo '=== PPU Verification ==='
 echo "Hostname: $(hostname), Node: ${NODE_NAME:-}"
 echo "RANK=${RANK:-} NODE_RANK=${NODE_RANK:-} WORLD_SIZE=${WORLD_SIZE:-} NPROC_PER_NODE=${NPROC_PER_NODE:-}"
