@@ -31,7 +31,7 @@ jobs:
     runs-on: k8s-runner-group-cpu-flytiger
     container:
       image: pkg.flytiger-eco.com/docker_release/llm:sdk2.2.0-pytorch2.11.0-ubuntu24.04-cuda13.0-sglang0.5.17-py312-20261001
-    timeout-minutes: 720
+    timeout-minutes: 360
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
