@@ -1,0 +1,81 @@
+name: PPU Linux Test
+
+on:
+  pull_request:
+    branches: [v0.6.17_dev]
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'docker/**'
+      - 'licenses/**'
+      - 'benchmarks/**'
+      - 'LICENSE'
+      - 'NOTICE'
+  workflow_dispatch:
+
+concurrency:
+  group: ppu-linux-test-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PPU_IMAGE: pkg.flytiger-eco.com/docker_release/llm:sdk2.2.0-pytorch2.11.0-ubuntu24.04-cuda13.0-sglang0.5.17-py312-20261001
+  PPU_SOURCE_DIR: /workspace/source
+
+jobs:
+  ppu-build-test-810e:
+    name: PPU Build and Test (810E)
+    runs-on: k8s-runner-group-cpu-flytiger
+    container:
+      image: pkg.flytiger-eco.com/docker_release/llm:sdk2.2.0-pytorch2.11.0-ubuntu24.04-cuda13.0-sglang0.5.17-py312-20261001
+    timeout-minutes: 360
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build wheel
+        run: bash ./scripts/task_ppu_build_wheel.sh
+
+      - name: Stage wheel for PPU test
+        run: |
+          mkdir -p wheelhouse/flashinfer-jit-cache
+          cp flashinfer-jit-cache/dist/*.whl wheelhouse/flashinfer-jit-cache/
+          echo "=== wheelhouse ==="
+          find wheelhouse -type f -print
+
+      - name: Run tests on 810E PPU
+        uses: flytiger-eco/ppu-distributed-action@main
+        with:
+          nnodes: 0
+          nproc_per_node: 1
+          node_selector: "board-type=OAM-810E"
+          host_volumes: "/nas_aisw:/nas_aisw,/wl_nas:/mnt/wl_nas"
+          image: ${{ env.PPU_IMAGE }}
+          source_dir: ${{ env.PPU_SOURCE_DIR }}
+          artifact_paths: wheelhouse
+          namespace: ppu-sched
+          timeout_minutes: 300
+          command: |
+            set -eu
+            bash "${PPU_SOURCE_DIR:-/workspace/source}/scripts/task_ppu_run_tests.sh"
+
+      - name: Test Summary
+        if: "!cancelled()"
+        run: |
+          {
+            echo "## PPU Linux Build and Test"
+            echo "- Runner: \`k8s-runner-group-cpu-flytiger\`"
+            echo "- Board: \`OAM-810E\` (1 PPU)"
+            echo "- Image: \`${PPU_IMAGE}\`"
+            echo "- Commit: \`${{ github.sha }}\`"
+            if [ "${{ job.status }}" = "success" ]; then
+              echo "- Status: Passed"
+            else
+              echo "- Status: ${{ job.status }}"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
