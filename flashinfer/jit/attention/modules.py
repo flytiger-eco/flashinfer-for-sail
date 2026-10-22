@@ -255,7 +255,7 @@ def gen_batch_decode_mla_module(
         and dtype_kv == torch.float16
         and dtype_o == torch.float16
         # For PPU Compatibility
-        and 'PPU_SDK' not in os.environ.keys()
+        and "PPU_SDK" not in os.environ.keys()
     ):
         logger.info("Use tensor-core SM80 version of MLA decode kernel.")
         arc = "sm80"

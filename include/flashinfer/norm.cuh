@@ -175,11 +175,11 @@ __global__ void RMSNormKernel(T* __restrict__ input, T* __restrict__ weight, T* 
 //     Stage 2: main normalizes current row using smem_weight → output; swap cur←next
 template <uint32_t VEC_SIZE, typename T, uint32_t NUM_HELPER_WARPS = 4, bool DEFER_WAIT = false,
           bool HAS_WEIGHT = true>
-__global__ void RMSNormPersistentKernel(
-    T* __restrict__ input, T* __restrict__ weight, T* __restrict__ output,
-    const uint32_t batch_size, const uint32_t d,
-    const uint32_t stride_input, const uint32_t stride_output,
-    float weight_bias, float eps) {
+__global__ void RMSNormPersistentKernel(T* __restrict__ input, T* __restrict__ weight,
+                                        T* __restrict__ output, const uint32_t batch_size,
+                                        const uint32_t d, const uint32_t stride_input,
+                                        const uint32_t stride_output, float weight_bias,
+                                        float eps) {
   const uint32_t tx = threadIdx.x, ty = threadIdx.y;
   constexpr uint32_t warp_size = 32;
   const uint32_t num_warps_total = blockDim.y;
@@ -201,9 +201,9 @@ __global__ void RMSNormPersistentKernel(
   const uint32_t float_region_bytes = (num_warps_main + 1) * sizeof(float);
   const uint32_t aligned_float_region = (float_region_bytes + 15u) & ~15u;
   float* smem_warp_sums = reinterpret_cast<float*>(smem_raw);
-  float* smem_rms_rcp   = smem_warp_sums + num_warps_main;
-  T* smem_weight        = reinterpret_cast<T*>(smem_raw + aligned_float_region);
-  T* smem_input_next    = smem_weight + d;
+  float* smem_rms_rcp = smem_warp_sums + num_warps_main;
+  T* smem_weight = reinterpret_cast<T*>(smem_raw + aligned_float_region);
+  T* smem_input_next = smem_weight + d;
 
   constexpr uint32_t cp_size = VEC_SIZE * sizeof(T);
 
@@ -238,11 +238,10 @@ __global__ void RMSNormPersistentKernel(
         const uint32_t e = (i * num_helper_threads + helper_thread_id) * VEC_SIZE;
         if (e < d) {
           if constexpr (cp_size == 16 || cp_size == 8 || cp_size == 4) {
-            uint32_t dst_addr = static_cast<uint32_t>(
-                __cvta_generic_to_shared(smem_weight + e));
+            uint32_t dst_addr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_weight + e));
             const T* src_ptr = weight + e;
-            asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
-                         ::"r"(dst_addr), "l"(src_ptr), "n"(cp_size));
+            asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n" ::"r"(dst_addr),
+                         "l"(src_ptr), "n"(cp_size));
           } else {
             vec_t<T, VEC_SIZE> tmp;
             tmp.fill(0.f);
@@ -264,8 +263,8 @@ __global__ void RMSNormPersistentKernel(
 #pragma unroll
     for (uint32_t j = 0; j < VEC_SIZE; j++) {
       float xi = float(inp_vec[j]);
-      x_cur[j]  = xi;
-      sum_sq   += xi * xi;
+      x_cur[j] = xi;
+      sum_sq += xi * xi;
     }
   }
 
@@ -278,11 +277,11 @@ __global__ void RMSNormPersistentKernel(
         const uint32_t e = (i * num_helper_threads + helper_thread_id) * VEC_SIZE;
         if (e < d) {
           if constexpr (cp_size == 16 || cp_size == 8 || cp_size == 4) {
-            uint32_t dst_addr = static_cast<uint32_t>(
-                __cvta_generic_to_shared(smem_input_next + e));
+            uint32_t dst_addr =
+                static_cast<uint32_t>(__cvta_generic_to_shared(smem_input_next + e));
             const T* src_inp = input + next_row * stride_input + e;
-            asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
-                         ::"r"(dst_addr), "l"(src_inp), "n"(cp_size));
+            asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n" ::"r"(dst_addr),
+                         "l"(src_inp), "n"(cp_size));
           } else {
             vec_t<T, VEC_SIZE> tmp;
             tmp.fill(0.f);
@@ -364,7 +363,7 @@ __global__ void RMSNormPersistentKernel(
 #pragma unroll
         for (uint32_t j = 0; j < VEC_SIZE; j++) {
           float xi = float(inp_next_vec[j]);
-          x_next[j]    = xi;
+          x_next[j] = xi;
           sum_sq_next += xi * xi;
         }
       }
@@ -377,11 +376,11 @@ __global__ void RMSNormPersistentKernel(
           const uint32_t e = (i * num_threads_main + main_thread_id) * VEC_SIZE;
           if (e < d) {
             if constexpr (cp_size == 16 || cp_size == 8 || cp_size == 4) {
-              uint32_t dst_addr = static_cast<uint32_t>(
-                  __cvta_generic_to_shared(smem_input_next + e));
+              uint32_t dst_addr =
+                  static_cast<uint32_t>(__cvta_generic_to_shared(smem_input_next + e));
               const T* src_inp = input + next_next_row * stride_input + e;
-              asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
-                           ::"r"(dst_addr), "l"(src_inp), "n"(cp_size));
+              asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n" ::"r"(dst_addr),
+                           "l"(src_inp), "n"(cp_size));
             } else {
               vec_t<T, VEC_SIZE> tmp;
               tmp.fill(0.f);
@@ -472,7 +471,6 @@ cudaError_t RMSNorm(T* input, T* weight, T* output, uint32_t batch_size, uint32_
   config.attrs = attrs;
 
   DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {
-
     constexpr uint32_t NUM_HELPER_WARPS = 4;
     const uint32_t num_threads_main = num_warps * 32;
     const uint32_t rounds = ceil_div(d, (uint32_t)VEC_SIZE * num_threads_main);
@@ -484,8 +482,7 @@ cudaError_t RMSNorm(T* input, T* weight, T* output, uint32_t batch_size, uint32_
       // Compute persistent kernel smem size:
       //   float region: (num_warps + 1) floats for warp_sums + rms_rcp, 16-byte aligned
       //   T region: 2 * d elements (weight + input_next)
-      const uint32_t float_region_bytes =
-          (num_warps + 1u) * static_cast<uint32_t>(sizeof(float));
+      const uint32_t float_region_bytes = (num_warps + 1u) * static_cast<uint32_t>(sizeof(float));
       const uint32_t aligned_float_region = (float_region_bytes + 15u) & ~15u;
       const uint32_t persistent_smem_size =
           aligned_float_region + 2u * d * static_cast<uint32_t>(sizeof(T));
@@ -495,21 +492,18 @@ cudaError_t RMSNorm(T* input, T* weight, T* output, uint32_t batch_size, uint32_
 
       int num_blocks_per_sm = 0, num_sms = 0, dev_id = 0;
       // cudaFuncSetAttribute must come before cudaOccupancyMaxActiveBlocksPerMultiprocessor
-      FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(persistent_kernel_fn,
-                                               cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                               persistent_smem_size));
+      FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(
+          persistent_kernel_fn, cudaFuncAttributeMaxDynamicSharedMemorySize, persistent_smem_size));
       FLASHINFER_CUDA_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
           &num_blocks_per_sm, persistent_kernel_fn, num_warps_total * 32, persistent_smem_size));
       FLASHINFER_CUDA_CALL(cudaGetDevice(&dev_id));
       FLASHINFER_CUDA_CALL(
           cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, dev_id));
 
-      const uint32_t total_persistent_blocks =
-          static_cast<uint32_t>(num_blocks_per_sm * num_sms);
+      const uint32_t total_persistent_blocks = static_cast<uint32_t>(num_blocks_per_sm * num_sms);
 
       if (total_persistent_blocks > 0) {
-        const uint32_t num_persistent_blocks =
-            std::min(batch_size, total_persistent_blocks);
+        const uint32_t num_persistent_blocks = std::min(batch_size, total_persistent_blocks);
         dim3 nblks_persistent(num_persistent_blocks);
         dim3 nthrs_persistent(32, num_warps_total);
         config.gridDim = nblks_persistent;
@@ -519,39 +513,33 @@ cudaError_t RMSNorm(T* input, T* weight, T* output, uint32_t batch_size, uint32_
         if (batch_size > 2 * num_persistent_blocks) {
           // Large bs: defer wait to next iteration for better overlap
           if (weight != nullptr) {
-            auto kernel_fn =
-                RMSNormPersistentKernel<VEC_SIZE, T, NUM_HELPER_WARPS, true, true>;
-            FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(kernel_fn,
-                                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                                     persistent_smem_size));
-            FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel_fn, input, weight,
-                                                   output, batch_size, d, stride_input,
-                                                   stride_output, weight_bias, eps));
+            auto kernel_fn = RMSNormPersistentKernel<VEC_SIZE, T, NUM_HELPER_WARPS, true, true>;
+            FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(
+                kernel_fn, cudaFuncAttributeMaxDynamicSharedMemorySize, persistent_smem_size));
+            FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel_fn, input, weight, output,
+                                                    batch_size, d, stride_input, stride_output,
+                                                    weight_bias, eps));
           } else {
-            auto kernel_fn =
-                RMSNormPersistentKernel<VEC_SIZE, T, NUM_HELPER_WARPS, true, false>;
-            FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(kernel_fn,
-                                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                                     persistent_smem_size));
-            FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel_fn, input, weight,
-                                                   output, batch_size, d, stride_input,
-                                                   stride_output, weight_bias, eps));
+            auto kernel_fn = RMSNormPersistentKernel<VEC_SIZE, T, NUM_HELPER_WARPS, true, false>;
+            FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(
+                kernel_fn, cudaFuncAttributeMaxDynamicSharedMemorySize, persistent_smem_size));
+            FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel_fn, input, weight, output,
+                                                    batch_size, d, stride_input, stride_output,
+                                                    weight_bias, eps));
           }
         } else {
           // Small bs: commit + wait together in Stage 1
           if (weight != nullptr) {
             FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, persistent_kernel_fn, input, weight,
-                                                   output, batch_size, d, stride_input,
-                                                   stride_output, weight_bias, eps));
+                                                    output, batch_size, d, stride_input,
+                                                    stride_output, weight_bias, eps));
           } else {
-            auto kernel_fn =
-                RMSNormPersistentKernel<VEC_SIZE, T, NUM_HELPER_WARPS, false, false>;
-            FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(kernel_fn,
-                                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                                     persistent_smem_size));
-            FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel_fn, input, weight,
-                                                   output, batch_size, d, stride_input,
-                                                   stride_output, weight_bias, eps));
+            auto kernel_fn = RMSNormPersistentKernel<VEC_SIZE, T, NUM_HELPER_WARPS, false, false>;
+            FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(
+                kernel_fn, cudaFuncAttributeMaxDynamicSharedMemorySize, persistent_smem_size));
+            FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel_fn, input, weight, output,
+                                                    batch_size, d, stride_input, stride_output,
+                                                    weight_bias, eps));
           }
         }
         used_persistent = true;
@@ -668,11 +656,11 @@ __global__ void RMSNormQuantKernel(T* __restrict__ input, T* __restrict__ weight
 }
 
 template <uint32_t VEC_SIZE, typename T, typename O>
-__global__ void RMSNormOnlineQuantKernel(
-    T* __restrict__ input, T* __restrict__ weight,
-    O* __restrict__ output, float* __restrict__ output_scale,
-    const uint32_t d, const uint32_t stride_input, const uint32_t stride_output,
-    float weight_bias, float eps) {
+__global__ void RMSNormOnlineQuantKernel(T* __restrict__ input, T* __restrict__ weight,
+                                         O* __restrict__ output, float* __restrict__ output_scale,
+                                         const uint32_t d, const uint32_t stride_input,
+                                         const uint32_t stride_output, float weight_bias,
+                                         float eps) {
   const uint32_t bx = blockIdx.x;
   const uint32_t tx = threadIdx.x, ty = threadIdx.y;
   constexpr uint32_t warp_size = 32;
@@ -821,13 +809,12 @@ __global__ void RMSNormOnlineQuantKernel(
 //   Stage 2: Main normalizes x_cur, computes max_abs, warp-reduces max_abs
 //   Stage 3: Helper warp 0 cross-reduces max_abs → scale_inv; writes output_scale
 //   Stage 4: Main quantizes x_cur → output; swaps cur←next
-template <uint32_t VEC_SIZE, typename T, typename O, uint32_t NUM_HELPER_WARPS = 4, bool DEFER_WAIT = false>
+template <uint32_t VEC_SIZE, typename T, typename O, uint32_t NUM_HELPER_WARPS = 4,
+          bool DEFER_WAIT = false>
 __global__ void RMSNormOnlineQuantPersistentKernel(
-    T* __restrict__ input, T* __restrict__ weight,
-    O* __restrict__ output, float* __restrict__ output_scale,
-    const uint32_t batch_size, const uint32_t d,
-    const uint32_t stride_input, const uint32_t stride_output,
-    float weight_bias, float eps) {
+    T* __restrict__ input, T* __restrict__ weight, O* __restrict__ output,
+    float* __restrict__ output_scale, const uint32_t batch_size, const uint32_t d,
+    const uint32_t stride_input, const uint32_t stride_output, float weight_bias, float eps) {
   const uint32_t tx = threadIdx.x, ty = threadIdx.y;
   constexpr uint32_t warp_size = 32;
   const uint32_t num_warps_total = blockDim.y;
@@ -851,9 +838,9 @@ __global__ void RMSNormOnlineQuantPersistentKernel(
   const uint32_t float_region_bytes = (num_warps_main + 1) * sizeof(float);
   const uint32_t aligned_float_region = (float_region_bytes + 15u) & ~15u;
   float* smem_warp_sums = reinterpret_cast<float*>(smem_raw);
-  float* smem_rms_rcp   = smem_warp_sums + num_warps_main;
-  T* smem_weight        = reinterpret_cast<T*>(smem_raw + aligned_float_region);
-  T* smem_input_next    = smem_weight + d;
+  float* smem_rms_rcp = smem_warp_sums + num_warps_main;
+  T* smem_weight = reinterpret_cast<T*>(smem_raw + aligned_float_region);
+  T* smem_input_next = smem_weight + d;
 
   constexpr uint32_t cp_size = VEC_SIZE * sizeof(T);
 
@@ -886,11 +873,10 @@ __global__ void RMSNormOnlineQuantPersistentKernel(
       const uint32_t e = (i * num_helper_threads + helper_thread_id) * VEC_SIZE;
       if (e < d) {
         if constexpr (cp_size == 16 || cp_size == 8 || cp_size == 4) {
-          uint32_t dst_addr = static_cast<uint32_t>(
-              __cvta_generic_to_shared(smem_weight + e));
+          uint32_t dst_addr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_weight + e));
           const T* src_ptr = weight + e;
-          asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
-                       ::"r"(dst_addr), "l"(src_ptr), "n"(cp_size));
+          asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n" ::"r"(dst_addr), "l"(src_ptr),
+                       "n"(cp_size));
         } else {
           vec_t<T, VEC_SIZE> tmp;
           tmp.fill(0.f);
@@ -911,8 +897,8 @@ __global__ void RMSNormOnlineQuantPersistentKernel(
 #pragma unroll
     for (uint32_t j = 0; j < VEC_SIZE; j++) {
       float xi = float(inp_vec[j]);
-      x_cur[j]  = xi;
-      sum_sq   += xi * xi;
+      x_cur[j] = xi;
+      sum_sq += xi * xi;
     }
   }
 
@@ -925,11 +911,11 @@ __global__ void RMSNormOnlineQuantPersistentKernel(
         const uint32_t e = (i * num_helper_threads + helper_thread_id) * VEC_SIZE;
         if (e < d) {
           if constexpr (cp_size == 16 || cp_size == 8 || cp_size == 4) {
-            uint32_t dst_addr = static_cast<uint32_t>(
-                __cvta_generic_to_shared(smem_input_next + e));
+            uint32_t dst_addr =
+                static_cast<uint32_t>(__cvta_generic_to_shared(smem_input_next + e));
             const T* src_inp = input + next_row * stride_input + e;
-            asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
-                         ::"r"(dst_addr), "l"(src_inp), "n"(cp_size));
+            asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n" ::"r"(dst_addr),
+                         "l"(src_inp), "n"(cp_size));
           } else {
             vec_t<T, VEC_SIZE> tmp;
             tmp.fill(0.f);
@@ -1007,7 +993,7 @@ __global__ void RMSNormOnlineQuantPersistentKernel(
 #pragma unroll
         for (uint32_t j = 0; j < VEC_SIZE; j++) {
           float xi = float(inp_next_vec[j]);
-          x_next[j]    = xi;
+          x_next[j] = xi;
           sum_sq_next += xi * xi;
         }
       }
@@ -1020,11 +1006,11 @@ __global__ void RMSNormOnlineQuantPersistentKernel(
           const uint32_t e = (i * num_threads_main + main_thread_id) * VEC_SIZE;
           if (e < d) {
             if constexpr (cp_size == 16 || cp_size == 8 || cp_size == 4) {
-              uint32_t dst_addr = static_cast<uint32_t>(
-                  __cvta_generic_to_shared(smem_input_next + e));
+              uint32_t dst_addr =
+                  static_cast<uint32_t>(__cvta_generic_to_shared(smem_input_next + e));
               const T* src_inp = input + next_next_row * stride_input + e;
-              asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
-                           ::"r"(dst_addr), "l"(src_inp), "n"(cp_size));
+              asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n" ::"r"(dst_addr),
+                           "l"(src_inp), "n"(cp_size));
             } else {
               vec_t<T, VEC_SIZE> tmp;
               tmp.fill(0.f);
@@ -1129,10 +1115,9 @@ __global__ void RMSNormOnlineQuantPersistentKernel(
 
 template <typename T, typename O>
 cudaError_t RMSNormOnlineQuant(T* input, T* weight, O* output, float* output_scale,
-                                uint32_t batch_size, uint32_t d,
-                                uint32_t stride_input, uint32_t stride_output,
-                                float eps = 1e-5, bool enable_pdl = false,
-                                cudaStream_t stream = 0) {
+                               uint32_t batch_size, uint32_t d, uint32_t stride_input,
+                               uint32_t stride_output, float eps = 1e-5, bool enable_pdl = false,
+                               cudaStream_t stream = 0) {
   const uint32_t vec_size = std::gcd(16 / sizeof(T), d);
 
   const uint32_t block_size = std::min<uint32_t>(1024, d / vec_size);
@@ -1154,7 +1139,6 @@ cudaError_t RMSNormOnlineQuant(T* input, T* weight, O* output, float* output_sca
   config.attrs = attrs;
 
   DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {
-
     constexpr uint32_t NUM_HELPER_WARPS = 4;
     const uint32_t num_threads_main = num_warps * 32;
     const uint32_t rounds = ceil_div(d, (uint32_t)VEC_SIZE * num_threads_main);
@@ -1163,8 +1147,7 @@ cudaError_t RMSNormOnlineQuant(T* input, T* weight, O* output, float* output_sca
     bool used_persistent = false;
     if (num_warps + NUM_HELPER_WARPS <= 32 && rounds <= 1) {
       const uint32_t num_warps_total = num_warps + NUM_HELPER_WARPS;
-      const uint32_t float_region_bytes =
-          (num_warps + 1u) * static_cast<uint32_t>(sizeof(float));
+      const uint32_t float_region_bytes = (num_warps + 1u) * static_cast<uint32_t>(sizeof(float));
       const uint32_t aligned_float_region = (float_region_bytes + 15u) & ~15u;
       const uint32_t persistent_smem_size =
           aligned_float_region + 2u * d * static_cast<uint32_t>(sizeof(T));
@@ -1173,21 +1156,18 @@ cudaError_t RMSNormOnlineQuant(T* input, T* weight, O* output, float* output_sca
           RMSNormOnlineQuantPersistentKernel<VEC_SIZE, T, O, NUM_HELPER_WARPS, false>;
 
       int num_blocks_per_sm = 0, num_sms = 0, dev_id = 0;
-      FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(persistent_kernel_fn,
-                                               cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                               persistent_smem_size));
+      FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(
+          persistent_kernel_fn, cudaFuncAttributeMaxDynamicSharedMemorySize, persistent_smem_size));
       FLASHINFER_CUDA_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
           &num_blocks_per_sm, persistent_kernel_fn, num_warps_total * 32, persistent_smem_size));
       FLASHINFER_CUDA_CALL(cudaGetDevice(&dev_id));
       FLASHINFER_CUDA_CALL(
           cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, dev_id));
 
-      const uint32_t total_persistent_blocks =
-          static_cast<uint32_t>(num_blocks_per_sm * num_sms);
+      const uint32_t total_persistent_blocks = static_cast<uint32_t>(num_blocks_per_sm * num_sms);
 
       if (total_persistent_blocks > 0) {
-        const uint32_t num_persistent_blocks =
-            std::min(batch_size, total_persistent_blocks);
+        const uint32_t num_persistent_blocks = std::min(batch_size, total_persistent_blocks);
         dim3 nblks_persistent(num_persistent_blocks);
         dim3 nthrs_persistent(32, num_warps_total);
         config.gridDim = nblks_persistent;
@@ -1196,18 +1176,18 @@ cudaError_t RMSNormOnlineQuant(T* input, T* weight, O* output, float* output_sca
 
         if (batch_size > 2 * num_persistent_blocks) {
           // Large bs: defer wait to next iteration for better overlap
-          auto kernel_fn = RMSNormOnlineQuantPersistentKernel<VEC_SIZE, T, O, NUM_HELPER_WARPS, true>;
-          FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(kernel_fn,
-                                                   cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                                   persistent_smem_size));
-          FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel_fn, input, weight,
-                                                 output, output_scale, batch_size, d, stride_input,
-                                                 stride_output, weight_bias, eps));
+          auto kernel_fn =
+              RMSNormOnlineQuantPersistentKernel<VEC_SIZE, T, O, NUM_HELPER_WARPS, true>;
+          FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(
+              kernel_fn, cudaFuncAttributeMaxDynamicSharedMemorySize, persistent_smem_size));
+          FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel_fn, input, weight, output,
+                                                  output_scale, batch_size, d, stride_input,
+                                                  stride_output, weight_bias, eps));
         } else {
           // Small bs: commit + wait together in Stage 1
           FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, persistent_kernel_fn, input, weight,
-                                                 output, output_scale, batch_size, d, stride_input,
-                                                 stride_output, weight_bias, eps));
+                                                  output, output_scale, batch_size, d, stride_input,
+                                                  stride_output, weight_bias, eps));
         }
         used_persistent = true;
       }
@@ -1273,7 +1253,7 @@ __global__ void QKRMSNormKernel(T* __restrict__ input, T* __restrict__ weight,
   const uint32_t num_workers = num_blks * num_warps;  // unroll on warp-dim
   const uint32_t num_jobs = batch_size * num_heads;
 
-    const uint32_t bx = blockIdx.x;
+  const uint32_t bx = blockIdx.x;
   const uint32_t tx = threadIdx.x, ty = threadIdx.y;
   const uint32_t worker_idx = bx * num_warps + ty;
 
@@ -1295,25 +1275,25 @@ __global__ void QKRMSNormKernel(T* __restrict__ input, T* __restrict__ weight,
     const uint32_t head_idx = job_idx % num_heads;
 
     for (uint32_t i = 0; i < rounds; i++) {
-    vec_t<T, VEC_SIZE> input_vec;
-    input_vec.fill(0.f);
-    if ((i * num_threads + thread_id) * VEC_SIZE < d) {
-      input_vec.load(input + batch_idx * stride_input_n + head_idx * stride_input_h +
+      vec_t<T, VEC_SIZE> input_vec;
+      input_vec.fill(0.f);
+      if ((i * num_threads + thread_id) * VEC_SIZE < d) {
+        input_vec.load(input + batch_idx * stride_input_n + head_idx * stride_input_h +
                        i * num_threads * VEC_SIZE + thread_id * VEC_SIZE);
-    }
+      }
 #pragma unroll
-    for (uint32_t j = 0; j < VEC_SIZE; j++) {
-            sum_sq += float(input_vec[j]) * float(input_vec[j]);
+      for (uint32_t j = 0; j < VEC_SIZE; j++) {
+        sum_sq += float(input_vec[j]) * float(input_vec[j]);
       }
     }
 
     // only have warp reduce sum
     // no need for __syncwarps as shfl already sync
 #pragma unroll
-      for (uint32_t offset = warp_size / 2; offset > 0; offset /= 2) {
-        sum_sq += math::shfl_xor_sync(sum_sq, offset);
-      }
-      
+    for (uint32_t offset = warp_size / 2; offset > 0; offset /= 2) {
+      sum_sq += math::shfl_xor_sync(sum_sq, offset);
+    }
+
     float rms_rcp = math::rsqrt(sum_sq / float(d) + eps);
 
     for (uint32_t i = 0; i < rounds; i++) {
@@ -1323,26 +1303,26 @@ __global__ void QKRMSNormKernel(T* __restrict__ input, T* __restrict__ weight,
       input_vec.fill(0.f);
       weight_vec.fill(0.f);
       if ((i * num_threads + thread_id) * VEC_SIZE < d) {
-            input_vec.load(input + batch_idx * stride_input_n + head_idx * stride_input_h +
+        input_vec.load(input + batch_idx * stride_input_n + head_idx * stride_input_h +
                        i * num_threads * VEC_SIZE + thread_id * VEC_SIZE);
         if constexpr (HAS_WEIGHT) {
           weight_vec.load(weight + i * num_threads * VEC_SIZE + thread_id * VEC_SIZE);
         }
       }
-        if constexpr (HAS_WEIGHT) {
-          #pragma unroll
-          for (uint32_t j = 0; j < VEC_SIZE; j++) {
-            output_vec[j] = float(input_vec[j]) * rms_rcp * (weight_bias + float(weight_vec[j]));
-          }
-        } else {
+      if constexpr (HAS_WEIGHT) {
 #pragma unroll
-          for (uint32_t j = 0; j < VEC_SIZE; j++) {
-            output_vec[j] = float(input_vec[j]) * rms_rcp;
-          }
+        for (uint32_t j = 0; j < VEC_SIZE; j++) {
+          output_vec[j] = float(input_vec[j]) * rms_rcp * (weight_bias + float(weight_vec[j]));
         }
-if ((i * num_threads + thread_id) * VEC_SIZE < d) {
+      } else {
+#pragma unroll
+        for (uint32_t j = 0; j < VEC_SIZE; j++) {
+          output_vec[j] = float(input_vec[j]) * rms_rcp;
+        }
+      }
+      if ((i * num_threads + thread_id) * VEC_SIZE < d) {
         output_vec.store(output + batch_idx * stride_output_n + head_idx * stride_output_h +
-                      i * num_threads * VEC_SIZE + thread_id * VEC_SIZE);
+                         i * num_threads * VEC_SIZE + thread_id * VEC_SIZE);
       }
     }
   }
@@ -1370,13 +1350,12 @@ if ((i * num_threads + thread_id) * VEC_SIZE < d) {
 //   and is mapped to addresses:
 //     input  + batch_idx * stride_input_n  + head_idx * stride_input_h  + offset
 //     output + batch_idx * stride_output_n + head_idx * stride_output_h + offset
-template <uint32_t VEC_SIZE, typename T, uint32_t NUM_HEADS_PER_ITER,
-          uint32_t NUM_HELPER_WARPS = 4, bool DEFER_WAIT = false, bool HAS_WEIGHT = true>
+template <uint32_t VEC_SIZE, typename T, uint32_t NUM_HEADS_PER_ITER, uint32_t NUM_HELPER_WARPS = 4,
+          bool DEFER_WAIT = false, bool HAS_WEIGHT = true>
 __global__ void QKRMSNormPersistentKernel(
-    T* __restrict__ input, T* __restrict__ weight, T* __restrict__ output,
-    const uint32_t d, const uint32_t batch_size, const uint32_t num_heads,
-    const uint32_t stride_input_n, const uint32_t stride_input_h,
-    const uint32_t stride_output_n, const uint32_t stride_output_h,
+    T* __restrict__ input, T* __restrict__ weight, T* __restrict__ output, const uint32_t d,
+    const uint32_t batch_size, const uint32_t num_heads, const uint32_t stride_input_n,
+    const uint32_t stride_input_h, const uint32_t stride_output_n, const uint32_t stride_output_h,
     float weight_bias, float eps) {
   const uint32_t tx = threadIdx.x, ty = threadIdx.y;
   constexpr uint32_t warp_size = 32;
@@ -1398,8 +1377,8 @@ __global__ void QKRMSNormPersistentKernel(
 
   // Shared memory layout (no smem_warp_sums / smem_rms_rcp; reductions are warp-local).
   extern __shared__ char smem_raw[];
-  T* smem_weight     = reinterpret_cast<T*>(smem_raw);            // [d]
-  T* smem_input_next = smem_weight + d;                            // [NUM_HEADS_PER_ITER * d]
+  T* smem_weight = reinterpret_cast<T*>(smem_raw);  // [d]
+  T* smem_input_next = smem_weight + d;             // [NUM_HEADS_PER_ITER * d]
 
   // Per-thread registers
   float x_cur[VEC_SIZE];
@@ -1431,11 +1410,10 @@ __global__ void QKRMSNormPersistentKernel(
         const uint32_t e = (i * num_helper_threads + helper_thread_id) * VEC_SIZE;
         if (e < d) {
           if constexpr (cp_size == 16 || cp_size == 8 || cp_size == 4) {
-            uint32_t dst_addr = static_cast<uint32_t>(
-                __cvta_generic_to_shared(smem_weight + e));
+            uint32_t dst_addr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_weight + e));
             const T* src_ptr = weight + e;
-            asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
-                         ::"r"(dst_addr), "l"(src_ptr), "n"(cp_size));
+            asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n" ::"r"(dst_addr),
+                         "l"(src_ptr), "n"(cp_size));
           } else {
             vec_t<T, VEC_SIZE> tmp;
             tmp.fill(0.f);
@@ -1456,18 +1434,19 @@ __global__ void QKRMSNormPersistentKernel(
     const uint32_t my_row = prologue_batch_base + ty;
     if (valid && my_row < num_jobs) {
       const uint32_t batch_idx = my_row / num_heads;
-      const uint32_t head_idx  = my_row % num_heads;
+      const uint32_t head_idx = my_row % num_heads;
       inp_vec.load(input + batch_idx * stride_input_n + head_idx * stride_input_h + vec_idx);
     }
 #pragma unroll
     for (uint32_t j = 0; j < VEC_SIZE; j++) {
       float xi = float(inp_vec[j]);
-      x_cur[j]  = xi;
-      sum_sq   += xi * xi;
+      x_cur[j] = xi;
+      sum_sq += xi * xi;
     }
   }
 
-  // --- Prologue Step 3: Helper prefetches next batch (NUM_HEADS_PER_ITER heads) → smem_input_next ---
+  // --- Prologue Step 3: Helper prefetches next batch (NUM_HEADS_PER_ITER heads) → smem_input_next
+  // ---
   if (is_helper) {
     const uint32_t next_batch_base = prologue_batch_base + grid_stride;
     const uint32_t elems_per_head = d / VEC_SIZE;
@@ -1481,19 +1460,17 @@ __global__ void QKRMSNormPersistentKernel(
         const uint32_t row = next_batch_base + h;
         if (row < num_jobs) {
           const uint32_t batch_idx = row / num_heads;
-          const uint32_t head_idx  = row % num_heads;
+          const uint32_t head_idx = row % num_heads;
           if constexpr (cp_size == 16 || cp_size == 8 || cp_size == 4) {
-            uint32_t dst_addr = static_cast<uint32_t>(
-                __cvta_generic_to_shared(smem_input_next + h * d + e));
-            const T* src_ptr = input + batch_idx * stride_input_n +
-                               head_idx * stride_input_h + e;
-            asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
-                         ::"r"(dst_addr), "l"(src_ptr), "n"(cp_size));
+            uint32_t dst_addr =
+                static_cast<uint32_t>(__cvta_generic_to_shared(smem_input_next + h * d + e));
+            const T* src_ptr = input + batch_idx * stride_input_n + head_idx * stride_input_h + e;
+            asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n" ::"r"(dst_addr),
+                         "l"(src_ptr), "n"(cp_size));
           } else {
             vec_t<T, VEC_SIZE> tmp;
             tmp.fill(0.f);
-            tmp.load(input + batch_idx * stride_input_n +
-                     head_idx * stride_input_h + e);
+            tmp.load(input + batch_idx * stride_input_n + head_idx * stride_input_h + e);
             tmp.store(smem_input_next + h * d + e);
           }
         }
@@ -1554,7 +1531,7 @@ __global__ void QKRMSNormPersistentKernel(
       const uint32_t my_row = batch_base + ty;
       if (valid && my_row < num_jobs) {
         const uint32_t batch_idx = my_row / num_heads;
-        const uint32_t head_idx  = my_row % num_heads;
+        const uint32_t head_idx = my_row % num_heads;
         vec_t<T, VEC_SIZE> weight_vec, out_vec;
         weight_vec.fill(0.f);
         out_vec.fill(0.f);
@@ -1570,8 +1547,7 @@ __global__ void QKRMSNormPersistentKernel(
             out_vec[j] = x_cur[j] * rms_rcp;
           }
         }
-        out_vec.store(output + batch_idx * stride_output_n + head_idx * stride_output_h +
-                      vec_idx);
+        out_vec.store(output + batch_idx * stride_output_n + head_idx * stride_output_h + vec_idx);
       }
 
       // (d) Compute x_next, sum_sq_next
@@ -1580,7 +1556,7 @@ __global__ void QKRMSNormPersistentKernel(
 #pragma unroll
         for (uint32_t j = 0; j < VEC_SIZE; j++) {
           float xi = float(inp_next_vec[j]);
-          x_next[j]    = xi;
+          x_next[j] = xi;
           sum_sq_next += xi * xi;
         }
       }
@@ -1612,19 +1588,17 @@ __global__ void QKRMSNormPersistentKernel(
           const uint32_t row = nn_batch_base + h;
           if (row < num_jobs) {
             const uint32_t batch_idx = row / num_heads;
-            const uint32_t head_idx  = row % num_heads;
+            const uint32_t head_idx = row % num_heads;
             if constexpr (cp_size == 16 || cp_size == 8 || cp_size == 4) {
-              uint32_t dst_addr = static_cast<uint32_t>(
-                  __cvta_generic_to_shared(smem_input_next + h * d + e));
-              const T* src_ptr = input + batch_idx * stride_input_n +
-                                 head_idx * stride_input_h + e;
-              asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
-                           ::"r"(dst_addr), "l"(src_ptr), "n"(cp_size));
+              uint32_t dst_addr =
+                  static_cast<uint32_t>(__cvta_generic_to_shared(smem_input_next + h * d + e));
+              const T* src_ptr = input + batch_idx * stride_input_n + head_idx * stride_input_h + e;
+              asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n" ::"r"(dst_addr),
+                           "l"(src_ptr), "n"(cp_size));
             } else {
               vec_t<T, VEC_SIZE> tmp;
               tmp.fill(0.f);
-              tmp.load(input + batch_idx * stride_input_n +
-                       head_idx * stride_input_h + e);
+              tmp.load(input + batch_idx * stride_input_n + head_idx * stride_input_h + e);
               tmp.store(smem_input_next + h * d + e);
             }
           }
@@ -1686,23 +1660,20 @@ cudaError_t QKRMSNorm(T* input, T* weight, T* output, uint32_t batch_size, uint3
           QKRMSNormPersistentKernel<VEC_SIZE, T, NUM_HEADS_PER_ITER, NUM_HELPER_WARPS, false, true>;
 
       int num_blocks_per_sm = 0, num_sms = 0, dev_id = 0;
-      FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(persistent_kernel_fn,
-                                                cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                                persistent_smem_size));
+      FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(
+          persistent_kernel_fn, cudaFuncAttributeMaxDynamicSharedMemorySize, persistent_smem_size));
       FLASHINFER_CUDA_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
           &num_blocks_per_sm, persistent_kernel_fn, num_warps_total * 32, persistent_smem_size));
       FLASHINFER_CUDA_CALL(cudaGetDevice(&dev_id));
       FLASHINFER_CUDA_CALL(
           cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, dev_id));
 
-      const uint32_t total_persistent_blocks =
-          static_cast<uint32_t>(num_blocks_per_sm * num_sms);
+      const uint32_t total_persistent_blocks = static_cast<uint32_t>(num_blocks_per_sm * num_sms);
 
       if (total_persistent_blocks > 0) {
         // Grid size: enough blocks to cover all jobs, capped by hardware
         const uint32_t needed_blocks = ceil_div(num_jobs, NUM_HEADS_PER_ITER);
-        const uint32_t num_persistent_blocks =
-            std::min(needed_blocks, total_persistent_blocks);
+        const uint32_t num_persistent_blocks = std::min(needed_blocks, total_persistent_blocks);
         dim3 nblks_persistent(num_persistent_blocks);
         dim3 nthrs_persistent(32, num_warps_total);
         config.gridDim = nblks_persistent;
@@ -1712,47 +1683,37 @@ cudaError_t QKRMSNorm(T* input, T* weight, T* output, uint32_t batch_size, uint3
         if (num_jobs > 2 * num_persistent_blocks * NUM_HEADS_PER_ITER) {
           // Large workload: defer wait for better overlap
           if (weight != nullptr) {
-            auto kernel_fn =
-                QKRMSNormPersistentKernel<VEC_SIZE, T, NUM_HEADS_PER_ITER, NUM_HELPER_WARPS, true, true>;
-            FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(kernel_fn,
-                                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                                     persistent_smem_size));
-            FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel_fn, input, weight,
-                                                   output, d, batch_size, num_heads,
-                                                   stride_input_n, stride_input_h,
-                                                   stride_output_n, stride_output_h,
-                                                   weight_bias, eps));
+            auto kernel_fn = QKRMSNormPersistentKernel<VEC_SIZE, T, NUM_HEADS_PER_ITER,
+                                                       NUM_HELPER_WARPS, true, true>;
+            FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(
+                kernel_fn, cudaFuncAttributeMaxDynamicSharedMemorySize, persistent_smem_size));
+            FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(
+                &config, kernel_fn, input, weight, output, d, batch_size, num_heads, stride_input_n,
+                stride_input_h, stride_output_n, stride_output_h, weight_bias, eps));
           } else {
-            auto kernel_fn =
-                QKRMSNormPersistentKernel<VEC_SIZE, T, NUM_HEADS_PER_ITER, NUM_HELPER_WARPS, true, false>;
-            FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(kernel_fn,
-                                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                                     persistent_smem_size));
-            FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel_fn, input, weight,
-                                                   output, d, batch_size, num_heads,
-                                                   stride_input_n, stride_input_h,
-                                                   stride_output_n, stride_output_h,
-                                                   weight_bias, eps));
+            auto kernel_fn = QKRMSNormPersistentKernel<VEC_SIZE, T, NUM_HEADS_PER_ITER,
+                                                       NUM_HELPER_WARPS, true, false>;
+            FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(
+                kernel_fn, cudaFuncAttributeMaxDynamicSharedMemorySize, persistent_smem_size));
+            FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(
+                &config, kernel_fn, input, weight, output, d, batch_size, num_heads, stride_input_n,
+                stride_input_h, stride_output_n, stride_output_h, weight_bias, eps));
           }
         } else {
           // Small workload: commit + wait together
           if (weight != nullptr) {
             FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, persistent_kernel_fn, input, weight,
-                                                   output, d, batch_size, num_heads,
-                                                   stride_input_n, stride_input_h,
-                                                   stride_output_n, stride_output_h,
-                                                   weight_bias, eps));
+                                                    output, d, batch_size, num_heads,
+                                                    stride_input_n, stride_input_h, stride_output_n,
+                                                    stride_output_h, weight_bias, eps));
           } else {
-            auto kernel_fn =
-                QKRMSNormPersistentKernel<VEC_SIZE, T, NUM_HEADS_PER_ITER, NUM_HELPER_WARPS, false, false>;
-            FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(kernel_fn,
-                                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                                     persistent_smem_size));
-            FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel_fn, input, weight,
-                                                   output, d, batch_size, num_heads,
-                                                   stride_input_n, stride_input_h,
-                                                   stride_output_n, stride_output_h,
-                                                   weight_bias, eps));
+            auto kernel_fn = QKRMSNormPersistentKernel<VEC_SIZE, T, NUM_HEADS_PER_ITER,
+                                                       NUM_HELPER_WARPS, false, false>;
+            FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(
+                kernel_fn, cudaFuncAttributeMaxDynamicSharedMemorySize, persistent_smem_size));
+            FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(
+                &config, kernel_fn, input, weight, output, d, batch_size, num_heads, stride_input_n,
+                stride_input_h, stride_output_n, stride_output_h, weight_bias, eps));
           }
         }
         used_persistent = true;
@@ -1778,10 +1739,9 @@ cudaError_t QKRMSNorm(T* input, T* weight, T* output, uint32_t batch_size, uint3
         dim3 nthrs(32, fallback_num_warps);
         config.gridDim = nblks;
         config.blockDim = nthrs;
-        FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel, input, weight, output, d,
-                                                batch_size, num_heads, stride_input_n,
-                                                stride_input_h, stride_output_n,
-                                                stride_output_h, weight_bias, eps));
+        FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(
+            &config, kernel, input, weight, output, d, batch_size, num_heads, stride_input_n,
+            stride_input_h, stride_output_n, stride_output_h, weight_bias, eps));
       } else {
         auto kernel = QKRMSNormKernel<VEC_SIZE, T, false>;
         int num_blocks_per_sm = 0, num_sms = 0, dev_id = 0;
@@ -1795,10 +1755,9 @@ cudaError_t QKRMSNorm(T* input, T* weight, T* output, uint32_t batch_size, uint3
         dim3 nthrs(32, fallback_num_warps);
         config.gridDim = nblks;
         config.blockDim = nthrs;
-        FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, kernel, input, weight, output, d,
-                                                batch_size, num_heads, stride_input_n,
-                                                stride_input_h, stride_output_n,
-                                                stride_output_h, weight_bias, eps));
+        FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(
+            &config, kernel, input, weight, output, d, batch_size, num_heads, stride_input_n,
+            stride_input_h, stride_output_n, stride_output_h, weight_bias, eps));
       }
     }
   });
@@ -1820,23 +1779,23 @@ __global__ void FusedAddRMSNormKernel(T* __restrict__ input, T* __restrict__ res
   const uint32_t rounds = ceil_div(d, VEC_SIZE * num_threads);
   extern __shared__ float smem[];
   float* smem_x = smem + ceil_div(num_warps, 4) * 4;
-  
+
   float sum_sq = 0.f;
 #if (__CUDACC_VER_MAJOR__ >= 12 && defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
   asm volatile("griddepcontrol.wait;");
 #endif
 
   for (uint32_t i = 0; i < rounds; i++) {
-        vec_t<T, VEC_SIZE> input_vec;
+    vec_t<T, VEC_SIZE> input_vec;
     input_vec.fill(0.f);
-        vec_t<T, VEC_SIZE> residual_vec;
+    vec_t<T, VEC_SIZE> residual_vec;
     residual_vec.fill(0.f);
     vec_t<float, VEC_SIZE> x_vec;
     x_vec.fill(0.f);
     if ((i * num_threads + thread_id) * VEC_SIZE < d) {
-input_vec.load(input + bx * stride_input + i * num_threads * VEC_SIZE + thread_id * VEC_SIZE);
+      input_vec.load(input + bx * stride_input + i * num_threads * VEC_SIZE + thread_id * VEC_SIZE);
       residual_vec.load(residual + bx * stride_residual + i * num_threads * VEC_SIZE +
-thread_id * VEC_SIZE);
+                        thread_id * VEC_SIZE);
     }
 #pragma unroll
     for (uint32_t j = 0; j < VEC_SIZE; j++) {
@@ -1908,8 +1867,8 @@ __device__ __forceinline__ void AsyncCopyVecChunk(T* smem_dst, const T* gmem_src
   constexpr uint32_t cp_size = VEC_SIZE * sizeof(T);
   if constexpr (cp_size == 16 || cp_size == 8 || cp_size == 4) {
     const uint32_t dst_addr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_dst));
-    asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n"
-                 ::"r"(dst_addr), "l"(gmem_src), "n"(cp_size));
+    asm volatile("cp.async.cg.shared.global [%0], [%1], %2;\n" ::"r"(dst_addr), "l"(gmem_src),
+                 "n"(cp_size));
   } else {
     vec_t<T, VEC_SIZE> tmp;
     tmp.fill(0.f);
@@ -1957,11 +1916,11 @@ __device__ __forceinline__ void AsyncCopyVecChunk(T* smem_dst, const T* gmem_src
 //              deferred to the next iteration's Stage 0 for maximum overlap)
 //     Stage 2: normalize current row from smem_weight; swap cur←next
 template <uint32_t VEC_SIZE, typename T, uint32_t NUM_HELPER_WARPS = 4>
-__global__ void FusedAddRMSNormPersistentKernel(
-    T* __restrict__ input, T* __restrict__ residual, T* __restrict__ weight,
-    const uint32_t batch_size, const uint32_t d,
-    const uint32_t stride_input, const uint32_t stride_residual,
-    float weight_bias, float eps) {
+__global__ void FusedAddRMSNormPersistentKernel(T* __restrict__ input, T* __restrict__ residual,
+                                                T* __restrict__ weight, const uint32_t batch_size,
+                                                const uint32_t d, const uint32_t stride_input,
+                                                const uint32_t stride_residual, float weight_bias,
+                                                float eps) {
   // NUM_HELPER_WARPS == 0 selects the non-warp-specialized (NoWS) mode
   constexpr bool USE_WS = (NUM_HELPER_WARPS > 0);
   static_assert(NUM_HELPER_WARPS == 0 || NUM_HELPER_WARPS >= 2,
@@ -1987,9 +1946,9 @@ __global__ void FusedAddRMSNormPersistentKernel(
   const uint32_t float_region_bytes = (num_warps_main + 1) * sizeof(float);
   const uint32_t aligned_float_region = (float_region_bytes + 15u) & ~15u;
   float* smem_warp_sums = reinterpret_cast<float*>(smem_raw);
-  float* smem_rms_rcp   = smem_warp_sums + num_warps_main;
-  T* smem_weight        = reinterpret_cast<T*>(smem_raw + aligned_float_region);
-  T* smem_input_next    = smem_weight + d;
+  float* smem_rms_rcp = smem_warp_sums + num_warps_main;
+  T* smem_weight = reinterpret_cast<T*>(smem_raw + aligned_float_region);
+  T* smem_input_next = smem_weight + d;
   T* smem_residual_next = smem_input_next + d;
 
   constexpr uint32_t cp_size = VEC_SIZE * sizeof(T);
@@ -2035,8 +1994,7 @@ __global__ void FusedAddRMSNormPersistentKernel(
       if (e < d) {
         AsyncCopyVecChunk<VEC_SIZE>(smem_weight + e, weight + e);
         if (next_row < batch_size) {
-          AsyncCopyVecChunk<VEC_SIZE>(smem_input_next + e,
-                                      input + next_row * stride_input + e);
+          AsyncCopyVecChunk<VEC_SIZE>(smem_input_next + e, input + next_row * stride_input + e);
           AsyncCopyVecChunk<VEC_SIZE>(smem_residual_next + e,
                                       residual + next_row * stride_residual + e);
         }
@@ -2055,14 +2013,14 @@ __global__ void FusedAddRMSNormPersistentKernel(
     inp_vec.fill(0.f);
     res_vec.fill(0.f);
     if (valid && blockIdx.x < batch_size) {
-      inp_vec.load(input    + blockIdx.x * stride_input    + vec_idx);
+      inp_vec.load(input + blockIdx.x * stride_input + vec_idx);
       res_vec.load(residual + blockIdx.x * stride_residual + vec_idx);
     }
 #pragma unroll
     for (uint32_t j = 0; j < VEC_SIZE; j++) {
       float xi = float(inp_vec[j]) + float(res_vec[j]);
-      x_cur[j]  = xi;
-      sum_sq   += xi * xi;
+      x_cur[j] = xi;
+      sum_sq += xi * xi;
       res_vec[j] = (T)xi;
     }
     if (valid && blockIdx.x < batch_size) {
@@ -2113,7 +2071,7 @@ __global__ void FusedAddRMSNormPersistentKernel(
       }
       // Load next row from smem double buffer to registers
       if (has_next && valid) {
-        inp_next_vec.load(smem_input_next    + vec_idx);
+        inp_next_vec.load(smem_input_next + vec_idx);
         res_next_vec.load(smem_residual_next + vec_idx);
       }
     }
@@ -2147,7 +2105,7 @@ __global__ void FusedAddRMSNormPersistentKernel(
 #pragma unroll
       for (uint32_t j = 0; j < VEC_SIZE; j++) {
         float xi = float(inp_next_vec[j]) + float(res_next_vec[j]);
-        x_next[j]    = xi;
+        x_next[j] = xi;
         sum_sq_next += xi * xi;
         res_next_vec[j] = (T)xi;
       }
@@ -2161,7 +2119,7 @@ __global__ void FusedAddRMSNormPersistentKernel(
         if (has_next_next) {
           const uint32_t next_next_row = row + 2 * gridDim.x;
           const uint32_t num_prefetch_threads = (NUM_HELPER_WARPS - 1) * warp_size;
-          const uint32_t prefetch_thread_id   = tx + (helper_ty - 1) * warp_size;
+          const uint32_t prefetch_thread_id = tx + (helper_ty - 1) * warp_size;
           const uint32_t copy_rounds_p = ceil_div(d, VEC_SIZE * num_prefetch_threads);
           for (uint32_t i = 0; i < copy_rounds_p; i++) {
             const uint32_t e = (i * num_prefetch_threads + prefetch_thread_id) * VEC_SIZE;
@@ -2259,7 +2217,6 @@ cudaError_t FusedAddRMSNormLauncher(T* input, T* residual, T* weight, uint32_t b
   config.attrs = attrs;
 
   DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {
-
     constexpr uint32_t NUM_HELPER_WARPS = 4;
     const uint32_t num_threads_main = num_warps * 32;
     const uint32_t rounds = ceil_div(d, (uint32_t)VEC_SIZE * num_threads_main);
@@ -2278,17 +2235,15 @@ cudaError_t FusedAddRMSNormLauncher(T* input, T* residual, T* weight, uint32_t b
       // Compute persistent kernel smem size:
       //   float region: (num_warps + 1) floats for warp_sums + rms_rcp, 16-byte aligned
       //   T region: 3 * d elements (weight + input_next + residual_next)
-      const uint32_t float_region_bytes =
-          (num_warps + 1u) * static_cast<uint32_t>(sizeof(float));
+      const uint32_t float_region_bytes = (num_warps + 1u) * static_cast<uint32_t>(sizeof(float));
       const uint32_t aligned_float_region = (float_region_bytes + 15u) & ~15u;
       const uint32_t persistent_smem_size =
           aligned_float_region + 3u * d * static_cast<uint32_t>(sizeof(T));
 
       // Same kernel template; NUM_HELPER_WARPS = 0 instantiates the NoWS mode.
       auto persistent_kernel_fn =
-          use_warp_specialization
-              ? FusedAddRMSNormPersistentKernel<VEC_SIZE, T, NUM_HELPER_WARPS>
-              : FusedAddRMSNormPersistentKernel<VEC_SIZE, T, 0>;
+          use_warp_specialization ? FusedAddRMSNormPersistentKernel<VEC_SIZE, T, NUM_HELPER_WARPS>
+                                  : FusedAddRMSNormPersistentKernel<VEC_SIZE, T, 0>;
 
       // The probe below (func attribute + occupancy) costs several runtime API
       // calls — more on platforms (e.g. PPU) where those APIs are unsupported and
@@ -2310,9 +2265,9 @@ cudaError_t FusedAddRMSNormLauncher(T* input, T* residual, T* weight, uint32_t b
         // to ensure the smem limit is raised before occupancy is queried. Some platforms
         // (e.g. PPU) do not support this attribute; tolerate the failure as long as the
         // default per-block smem limit already covers the request.
-        cudaError_t set_attr_status = cudaFuncSetAttribute(
-            persistent_kernel_fn, cudaFuncAttributeMaxDynamicSharedMemorySize,
-            persistent_smem_size);
+        cudaError_t set_attr_status =
+            cudaFuncSetAttribute(persistent_kernel_fn, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                 persistent_smem_size);
         if (set_attr_status != cudaSuccess) {
           int default_smem_per_block = 0;
           FLASHINFER_CUDA_CALL(cudaDeviceGetAttribute(&default_smem_per_block,
@@ -2355,8 +2310,8 @@ cudaError_t FusedAddRMSNormLauncher(T* input, T* residual, T* weight, uint32_t b
         config.dynamicSmemBytes = persistent_smem_size;
 
         FLASHINFER_CUDA_CALL(cudaLaunchKernelEx(&config, persistent_kernel_fn, input, residual,
-                                               weight, batch_size, d, stride_input,
-                                               stride_residual, weight_bias, eps));
+                                                weight, batch_size, d, stride_input,
+                                                stride_residual, weight_bias, eps));
         used_persistent = true;
       }
     }
