@@ -800,7 +800,7 @@ def gen_jit_spec(
             cuda_cflags_by_source[source] = source_defaults + list(source_flags)
     if extra_cuda_cflags is not None:
         cuda_cflags += extra_cuda_cflags
-    USE_SAIL = 'PPU_SDK' in os.environ.keys()
+    USE_SAIL = "PPU_SDK" in os.environ.keys()
     if USE_SAIL:
         cflags.append("-DUSE_SAIL")
         cuda_cflags.append("-DUSE_SAIL")
