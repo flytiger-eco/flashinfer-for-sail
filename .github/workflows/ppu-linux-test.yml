@@ -49,11 +49,11 @@ jobs:
           find wheelhouse -type f -print
 
       - name: Run tests on 810E PPU
-        uses: flytiger-eco/ppu-distributed-action@main
+        uses: flytiger-eco/shared-workflows/cluster-task@main
         with:
           nnodes: 0
           nproc_per_node: 1
-          node_selector: "board-type=OAM-810E"
+          node_selector: "board-type=ZW-810E"
           host_volumes: "/nas_aisw:/nas_aisw,/wl_nas:/mnt/wl_nas"
           image: ${{ env.PPU_IMAGE }}
           source_dir: ${{ env.PPU_SOURCE_DIR }}
@@ -70,7 +70,7 @@ jobs:
           {
             echo "## PPU Linux Build and Test"
             echo "- Runner: \`k8s-runner-group-cpu-flytiger\`"
-            echo "- Board: \`OAM-810E\` (1 PPU)"
+            echo "- Board: \`ZW-810E\` (1 PPU)"
             echo "- Image: \`${PPU_IMAGE}\`"
             echo "- Commit: \`${{ github.sha }}\`"
             if [ "${{ job.status }}" = "success" ]; then
