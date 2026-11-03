@@ -64,6 +64,11 @@ echo "========================================"
 echo "Installing and verifying wheel"
 echo "========================================"
 pip install "${WHEEL_FILE}"
+# The build image ships flashinfer-cubin 0.6.12 (pulled in by sglang). Our wheel
+# is 0.6.18, and flashinfer.jit.env enforces a matching cubin version at import
+# time. A pure-JIT wheel does not need that precompiled-cubin package, so drop the
+# stale one to verify a clean import (matches a fresh end-user install).
+pip uninstall -y flashinfer-cubin || true
 python -c "import flashinfer; print('flashinfer', flashinfer.__version__)"
 
 echo ""
