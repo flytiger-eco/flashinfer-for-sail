@@ -1912,9 +1912,10 @@ __device__ __forceinline__ void AsyncCopyVecChunk(T* smem_dst, const T* gmem_src
 //              row and load next row data from smem to regs
 //     Stage 1: cross-reduce → rms_rcp (WS: helper warp 0; NoWS: warp 0);
 //              compute x_next; prefetch row+2*gridDim.x into the double buffer
-//              (WS: helper warps 1.., commit+wait; NoWS: own chunk, wait
+//              (WS: helper warps 1.., commit only; NoWS: own chunk, wait
 //              deferred to the next iteration's Stage 0 for maximum overlap)
-//     Stage 2: normalize current row from smem_weight; swap cur←next
+//     Stage 2: normalize current row from smem_weight; swap cur←next;
+//              WS helpers wait for prefetch, then all threads synchronize
 template <uint32_t VEC_SIZE, typename T, uint32_t NUM_HELPER_WARPS = 4>
 __global__ void FusedAddRMSNormPersistentKernel(T* __restrict__ input, T* __restrict__ residual,
                                                 T* __restrict__ weight, const uint32_t batch_size,
@@ -2048,7 +2049,7 @@ __global__ void FusedAddRMSNormPersistentKernel(T* __restrict__ input, T* __rest
     // Stage 0:
     //   NoWS: await the prefetch issued in the previous Stage 1 (each thread
     //         only consumes the chunk it issued itself, so wait_group suffices;
-    //         WS helpers already waited inside Stage 1 before the barrier)
+    //         WS helpers waited at the previous iteration's final hand-off)
     //   Compute threads: warp-reduce sum_sq → smem_warp_sums[ty];
     //         if has_next: load next row from smem → regs (inp_next_vec, res_next_vec)
     //   WS helpers: idle
@@ -2084,59 +2085,70 @@ __global__ void FusedAddRMSNormPersistentKernel(T* __restrict__ input, T* __rest
     //   Compute threads: if has_next, compute x_next, sum_sq_next,
     //     writeback residual_next
     //   Prefetch row + 2*gridDim.x → smem double buffer:
-    //     WS: helper warps 1.., then commit+wait (barrier publishes to main)
+    //     WS: helper warps 1.., commit only; wait and hand-off follow Stage 2
     //     NoWS: each thread its own chunk, commit only — the wait is deferred
     //       to the next iteration's Stage 0, overlapping with Stage 2
     // -----------------------------------------------------------------
     sum_sq_next = 0.f;
-    const bool is_reducer_warp = USE_WS ? (is_helper && helper_ty == 0) : (ty == 0);
-    if (is_reducer_warp) {
-      float val = (tx < num_warps_main) ? smem_warp_sums[tx] : 0.f;
-#pragma unroll
-      for (uint32_t offset = warp_size / 2; offset > 0; offset /= 2) {
-        val += math::shfl_xor_sync(val, offset);
-      }
-      if (tx == 0) {
-        smem_rms_rcp[0] = math::rsqrt(val / float(d) + eps);
-      }
-    }
-    if (!is_helper && has_next) {
-      // Compute x_next, accumulate sum_sq_next, writeback residual_next
-#pragma unroll
-      for (uint32_t j = 0; j < VEC_SIZE; j++) {
-        float xi = float(inp_next_vec[j]) + float(res_next_vec[j]);
-        x_next[j] = xi;
-        sum_sq_next += xi * xi;
-        res_next_vec[j] = (T)xi;
-      }
-      if (valid) {
-        res_next_vec.store(residual + (row + gridDim.x) * stride_residual + vec_idx);
-      }
-    }
-    if constexpr (USE_WS) {
-      if (is_helper && helper_ty >= 1) {
+    const bool is_prefetch_warp = USE_WS && is_helper && helper_ty >= 1;
+    if (is_prefetch_warp) {
+      if constexpr (USE_WS) {
         // Helper warps 1..: prefetch row + 2*gridDim.x
         if (has_next_next) {
           const uint32_t next_next_row = row + 2 * gridDim.x;
-          const uint32_t num_prefetch_threads = (NUM_HELPER_WARPS - 1) * warp_size;
+          constexpr uint32_t num_prefetch_threads = (NUM_HELPER_WARPS - 1) * warp_size;
           const uint32_t prefetch_thread_id = tx + (helper_ty - 1) * warp_size;
-          const uint32_t copy_rounds_p = ceil_div(d, VEC_SIZE * num_prefetch_threads);
-          for (uint32_t i = 0; i < copy_rounds_p; i++) {
+          constexpr uint32_t elems_per_round = VEC_SIZE * num_prefetch_threads;
+          const uint32_t full_rounds = d / elems_per_round;
+          // Complete rounds are valid for every prefetch thread.
+          for (uint32_t i = 0; i < full_rounds; ++i) {
             const uint32_t e = (i * num_prefetch_threads + prefetch_thread_id) * VEC_SIZE;
-            if (e < d) {
-              AsyncCopyVecChunk<VEC_SIZE>(smem_input_next + e,
-                                          input + next_next_row * stride_input + e);
-              AsyncCopyVecChunk<VEC_SIZE>(smem_residual_next + e,
-                                          residual + next_next_row * stride_residual + e);
-            }
+            AsyncCopyVecChunk<VEC_SIZE>(smem_input_next + e,
+                                        input + next_next_row * stride_input + e);
+            AsyncCopyVecChunk<VEC_SIZE>(smem_residual_next + e,
+                                        residual + next_next_row * stride_residual + e);
+          }
+          // At most one partial round remains; only it needs a bounds check.
+          const uint32_t tail_e =
+              (full_rounds * num_prefetch_threads + prefetch_thread_id) * VEC_SIZE;
+          if (tail_e < d) {
+            AsyncCopyVecChunk<VEC_SIZE>(smem_input_next + tail_e,
+                                        input + next_next_row * stride_input + tail_e);
+            AsyncCopyVecChunk<VEC_SIZE>(smem_residual_next + tail_e,
+                                        residual + next_next_row * stride_residual + tail_e);
           }
         }
         if constexpr (use_cp_async) {
           asm volatile("cp.async.commit_group;\n");
-          asm volatile("cp.async.wait_group 0;\n");
         }
       }
     } else {
+      const bool is_reducer_warp = USE_WS ? (is_helper && helper_ty == 0) : (ty == 0);
+      if (is_reducer_warp) {
+        float val = (tx < num_warps_main) ? smem_warp_sums[tx] : 0.f;
+#pragma unroll
+        for (uint32_t offset = warp_size / 2; offset > 0; offset /= 2) {
+          val += math::shfl_xor_sync(val, offset);
+        }
+        if (tx == 0) {
+          smem_rms_rcp[0] = math::rsqrt(val / float(d) + eps);
+        }
+      }
+      if (!is_helper && has_next) {
+        // Compute x_next, accumulate sum_sq_next, writeback residual_next
+#pragma unroll
+        for (uint32_t j = 0; j < VEC_SIZE; j++) {
+          float xi = float(inp_next_vec[j]) + float(res_next_vec[j]);
+          x_next[j] = xi;
+          sum_sq_next += xi * xi;
+          res_next_vec[j] = (T)xi;
+        }
+        if (valid) {
+          res_next_vec.store(residual + (row + gridDim.x) * stride_residual + vec_idx);
+        }
+      }
+    }
+    if constexpr (!USE_WS) {
       if (has_next_next && valid) {
         const uint32_t next_next_row = row + 2 * gridDim.x;
         AsyncCopyVecChunk<VEC_SIZE>(smem_input_next + vec_idx,
@@ -2176,7 +2188,19 @@ __global__ void FusedAddRMSNormPersistentKernel(T* __restrict__ input, T* __rest
       }
       sum_sq = sum_sq_next;
     }
-    // No __syncthreads() needed here: next iteration's Stage 0 smem write
+    // Main warps reach this hand-off after current-row normalization/writeback.
+    // Prefetch warps wait for their copies; all threads join the publishing barrier.
+    if constexpr (USE_WS) {
+      if (has_next_next) {
+        if (is_helper && helper_ty >= 1) {
+          if constexpr (use_cp_async) {
+            asm volatile("cp.async.wait_group 0;\n");
+          }
+        }
+        __syncthreads();
+      }
+    }
+    // No additional __syncthreads() needed: next iteration's Stage 0 smem write
     // (smem_warp_sums) happens before Stage 1 reads it, protected by the
     // __syncthreads() at the end of Stage 0.
   }  // end persistent loop
