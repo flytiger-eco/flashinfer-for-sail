@@ -25,6 +25,7 @@ from filelock import FileLock
 from ..compilation_context import CompilationContext
 from . import env as jit_env
 from .cpp_ext import generate_ninja_build_for_op, get_nvcc_parallelism_flags, run_ninja
+from . import sailify_staging
 from .utils import write_if_different
 
 os.makedirs(jit_env.FLASHINFER_WORKSPACE_DIR, exist_ok=True)
@@ -511,18 +512,21 @@ class JitSpecNvcc(JitSpec):
     def write_ninja(self) -> None:
         ninja_path = self.ninja_path
         self.build_dir.mkdir(parents=True, exist_ok=True)
-        embedded_cubins = (
-            self.embedded_cubin_factory(self.build_dir)
-            if self.embedded_cubin_factory is not None
-            else None
-        )
+        sources = self.sources
+        extra_include_dirs = self.extra_include_dirs
+        # cuda-free (PPU) builds compile from a sailify-staged mirror tree so
+        # the upstream CUDA sources are never modified in place.
+        if sailify_staging.sailify_enabled():
+            sources, extra_include_dirs = sailify_staging.stage_module(
+                self.name, sources, extra_include_dirs
+            )
         content = generate_ninja_build_for_op(
             name=self.name,
-            sources=self.sources,
+            sources=sources,
             extra_cflags=self.extra_cflags,
             extra_cuda_cflags=self.extra_cuda_cflags,
             extra_ldflags=self.extra_ldflags,
-            extra_include_dirs=self.extra_include_dirs,
+            extra_include_dirs=extra_include_dirs,
             needs_device_linking=self.needs_device_linking,
             embedded_cubins=embedded_cubins,
             extra_cuda_cflags_by_source=self.extra_cuda_cflags_by_source,
@@ -653,9 +657,15 @@ class JitSpecNvcc(JitSpec):
             for source, flags in (self.extra_cuda_cflags_by_source or {}).items()
         }
 
-        # Get compilers
+        # Get compilers. PPU builds use the native hgcc driver so generated
+        # registration stubs match libhggcrt's __hggc* ABI.
         cxx = os.environ.get("CXX", "c++")
-        nvcc = os.environ.get("FLASHINFER_NVCC", f"{cuda_home}/bin/nvcc")
+        nvcc_default = (
+            f"{cuda_home}/bin/hgcc"
+            if sailify_staging.ppu_sdk_root()
+            else f"{cuda_home}/bin/nvcc"
+        )
+        nvcc = os.environ.get("FLASHINFER_NVCC", nvcc_default)
 
         # Build directory
         build_dir = str(self.build_dir.resolve())
@@ -717,10 +727,9 @@ def gen_jit_spec(
     including the module-wide ``use_fast_math`` setting.
     """
     check_cuda_arch()
-    # Use FLASHINFER_JIT_DEBUG if set, otherwise use FLASHINFER_JIT_VERBOSE (for backward compatibility)
-    debug_env = os.environ.get("FLASHINFER_JIT_DEBUG")
-    verbose_env = os.environ.get("FLASHINFER_JIT_VERBOSE", "0")
-    debug = (debug_env if debug_env is not None else verbose_env) == "1"
+    # FLASHINFER_JIT_DEBUG controls debug compilation flags (-O0, -G, etc.)
+    # FLASHINFER_JIT_VERBOSE only controls build output verbosity, not compilation flags
+    debug = os.environ.get("FLASHINFER_JIT_DEBUG", "0") == "1"
 
     # Only add default C++ standard if not specified in extra flags
     cflags_has_std = extra_cflags is not None and any(
@@ -791,7 +800,10 @@ def gen_jit_spec(
             cuda_cflags_by_source[source] = source_defaults + list(source_flags)
     if extra_cuda_cflags is not None:
         cuda_cflags += extra_cuda_cflags
-
+    USE_SAIL = "PPU_SDK" in os.environ.keys()
+    if USE_SAIL:
+        cflags.append("-DUSE_SAIL")
+        cuda_cflags.append("-DUSE_SAIL")
     spec = JitSpecNvcc(
         name=name,
         sources=[Path(x) for x in sources],
