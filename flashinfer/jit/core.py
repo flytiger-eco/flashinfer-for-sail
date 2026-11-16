@@ -512,6 +512,11 @@ class JitSpecNvcc(JitSpec):
     def write_ninja(self) -> None:
         ninja_path = self.ninja_path
         self.build_dir.mkdir(parents=True, exist_ok=True)
+        embedded_cubins = (
+            self.embedded_cubin_factory(self.build_dir)
+            if self.embedded_cubin_factory is not None
+            else None
+        )
         sources = self.sources
         extra_include_dirs = self.extra_include_dirs
         # cuda-free (PPU) builds compile from a sailify-staged mirror tree so

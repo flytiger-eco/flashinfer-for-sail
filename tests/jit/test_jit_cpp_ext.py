@@ -188,6 +188,11 @@ def test_generate_ninja_uses_sccache_compatible_nvcc_depfile_flag(
     assert "--dependency-output" not in ninja
 
 
+@pytest.mark.skipif(
+    ppu_env.ppu_sdk_root() is not None,
+    reason="CUDA gencode flag propagation is not meaningful under the "
+    "cuda-free PPU toolchain (it emits --gpu-architecture=ppu_* instead)",
+)
 def test_generate_ninja_propagates_cuda_arch_flags_to_nvcc_link(monkeypatch, tmp_path):
     monkeypatch.setattr(cpp_ext, "get_cuda_path", lambda: "/usr/local/cuda")
     monkeypatch.setattr(cpp_ext.jit_env, "FLASHINFER_JIT_DIR", tmp_path / "jit")

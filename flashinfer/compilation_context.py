@@ -64,6 +64,25 @@ def _ppu_cuda_free_build() -> bool:
     return ppu_sdk_root() is not None
 
 
+def _nvcc_supports_sm107() -> bool:
+    """Can the nvcc we will actually invoke emit compute_107a? False on any error."""
+    import subprocess
+
+    from flashinfer.jit.cpp_ext import get_cuda_path
+
+    try:
+        nvcc = os.path.join(get_cuda_path(), "bin", "nvcc")
+        out = subprocess.run(
+            [nvcc, "--list-gpu-arch"], capture_output=True, text=True, timeout=60
+        )
+        if out.returncode != 0:
+            return False
+        return "compute_107" in out.stdout
+    except Exception as e:
+        logger.warning(f"Could not query nvcc for compute_107a support: {e}.")
+        return False
+
+
 class CompilationContext:
     if _ppu_cuda_free_build():
         # NOTE(cuda-free/PPU): FP4 (E2M1) is disabled. The cuda-free
