@@ -74,6 +74,24 @@ _SAILIFY_PATCHES = {
             "using MinReduceOp = thrust::minimum<>;",
         ),
     ],
+    "include/flashinfer/fast_topk_clusters_exact.cuh": [
+        # cudaGridDependencySynchronize maps to hggcGridDependencySynchronize,
+        # which the PPU toolchain does not define (PDL / programmatic
+        # dependent launch is CUDA-only). The template still instantiates the
+        # PDL_ENABLED=true variant at compile time even though PPU never
+        # selects it at runtime, so neutralize the sync: with PDL never
+        # enabled on PPU the dependency the call establishes never exists.
+        (
+            "if (PDL_ENABLED) hggcGridDependencySynchronize();",
+            "if (PDL_ENABLED) { /* PPU: no PDL; grid-dependency sync is a "
+            "no-op */ }",
+        ),
+        # fallback in case the converted statement keeps a different shape
+        (
+            "hggcGridDependencySynchronize();",
+            "{ /* PPU: no PDL; grid-dependency sync is a no-op */ }",
+        ),
+    ],
 }
 
 # The PPU detection logic lives in flashinfer._ppu_env (dependency-free by
