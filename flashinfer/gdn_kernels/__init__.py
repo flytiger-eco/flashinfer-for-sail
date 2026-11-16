@@ -31,7 +31,7 @@ try:
     )
 
     _has_cute_dsl = True
-except (ImportError, RuntimeError):
+except (ImportError, RuntimeError, AttributeError):
     _has_cute_dsl = False
     gated_delta_rule = None  # type: ignore
     gated_delta_rule_mtp = None  # type: ignore
@@ -47,7 +47,7 @@ try:
     )
 
     _GDN_DECODE_BF16_WY_OUTPUT_ONLY_AVAILABLE = True
-except (ImportError, RuntimeError):
+except (ImportError, RuntimeError, AttributeError):
     _GDN_DECODE_BF16_WY_OUTPUT_ONLY_AVAILABLE = False
     gated_delta_rule_mtp_wy_output_only = None  # type: ignore
 
@@ -57,22 +57,22 @@ except (ImportError, RuntimeError):
 # are chosen at import time via GDN_UCACHE_{IO,STATE,RING}_DTYPE.
 try:
     from .gdn_decode_bf16_wy_ucache import gated_delta_rule_mtp_ucache
-except (ImportError, RuntimeError):
+except (ImportError, RuntimeError, AttributeError):
     gated_delta_rule_mtp_ucache = None  # type: ignore
 
 try:
     from .gdn_decode_bf16_wy_ucache_flush import gated_delta_rule_mtp_ucache_flush
-except (ImportError, RuntimeError):
+except (ImportError, RuntimeError, AttributeError):
     gated_delta_rule_mtp_ucache_flush = None  # type: ignore
 
 try:
     from .gdn_decode_pretranspose import run_pretranspose_decode
-except (ImportError, RuntimeError):
+except (ImportError, RuntimeError, AttributeError):
     run_pretranspose_decode = None  # type: ignore
 
 try:
     from .gdn_decode_nontranspose import run_nontranspose_decode
-except (ImportError, RuntimeError):
+except (ImportError, RuntimeError, AttributeError):
     run_nontranspose_decode = None  # type: ignore
 
 try:
@@ -82,7 +82,7 @@ try:
         get_vec_size_mtp,
         get_mtp_config,
     )
-except (ImportError, RuntimeError):
+except (ImportError, RuntimeError, AttributeError):
     run_mtp_decode = None  # type: ignore
     get_tile_v_mtp = None  # type: ignore
     get_vec_size_mtp = None  # type: ignore
@@ -94,7 +94,7 @@ try:
         chunk_gated_delta_rule_sm100,
         cp_delta_rule_dsl_sm100,
     )
-except (ImportError, RuntimeError):
+except (ImportError, RuntimeError, AttributeError):
     _chunk_gated_delta_rule_gdn_cp_sm100 = None  # type: ignore
     chunk_gated_delta_rule_sm100 = None  # type: ignore
     cp_delta_rule_dsl_sm100 = None  # type: ignore
@@ -106,7 +106,7 @@ try:
         cp_delta_rule_dsl_sm90,
         cp_delta_rule_dsl_sm120,
     )
-except (ImportError, RuntimeError):
+except (ImportError, RuntimeError, AttributeError):
     chunk_gated_delta_rule_sm90 = None  # type: ignore
     chunk_gated_delta_rule_sm120 = None  # type: ignore
     cp_delta_rule_dsl_sm90 = None  # type: ignore

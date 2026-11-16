@@ -51,7 +51,19 @@ def cutlass_supports_sm107() -> bool:
     return False
 
 
-@functools.lru_cache(maxsize=1)
+def _ppu_cuda_free_build() -> bool:
+    """True when running under the cuda-free PPU toolchain (envsetup.sh ppu).
+
+    Delegates to the dependency-free flashinfer._ppu_env detector (PPU_SDK_ROOT
+    override + CUDA_SDK heuristics). Must not import flashinfer.jit: this
+    module is loaded from flashinfer.jit.env, and the COMMON_NVCC_FLAGS class
+    body below runs at import time.
+    """
+    from ._ppu_env import ppu_sdk_root
+
+    return ppu_sdk_root() is not None
+
+
 def _nvcc_supports_sm107() -> bool:
     """Can the nvcc we will actually invoke emit compute_107a? False on any error."""
     import subprocess
@@ -72,10 +84,19 @@ def _nvcc_supports_sm107() -> bool:
 
 
 class CompilationContext:
-    COMMON_NVCC_FLAGS = [
-        "-DFLASHINFER_ENABLE_FP8_E8M0",
-        "-DFLASHINFER_ENABLE_FP4_E2M1",
-    ]
+    if _ppu_cuda_free_build():
+        # NOTE(cuda-free/PPU): FP4 (E2M1) is disabled. The cuda-free
+        # toolchain has no working fp4 path (the hggc_fp4 shim is a stub),
+        # and the flag pulls vec_t<__nv_fp4_e2m1> specializations that no
+        # sailify identifier mapping covers.
+        COMMON_NVCC_FLAGS = [
+            "-DFLASHINFER_ENABLE_FP8_E8M0",
+        ]
+    else:
+        COMMON_NVCC_FLAGS = [
+            "-DFLASHINFER_ENABLE_FP8_E8M0",
+            "-DFLASHINFER_ENABLE_FP4_E2M1",
+        ]
 
     @staticmethod
     def _normalize_cuda_arch(major: int, minor: int) -> tuple[int, str]:

@@ -246,7 +246,7 @@ def _load_impl(impl: str):
     """Import the ``kernel/gdn_fused_decode_<impl>`` module, or None."""
     try:
         return importlib.import_module(f".kernel.gdn_fused_decode_{impl}", __package__)
-    except (ImportError, RuntimeError) as exc:
+    except (ImportError, RuntimeError, AttributeError) as exc:
         jit_logger.warning_once(
             "Specialized fused GDN decode impl '%s' is unavailable (%s).",
             impl,

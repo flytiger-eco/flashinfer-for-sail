@@ -7,17 +7,17 @@ except ImportError:
 
 try:
     from .delta_rule_sm120 import delta_rule_prefill_dsl as chunk_gated_delta_rule_sm120
-except (ImportError, RuntimeError):
+except (ImportError, RuntimeError, AttributeError):
     chunk_gated_delta_rule_sm120 = None  # type: ignore
 
 try:
     from .delta_rule_cp_sm90 import cp_delta_rule_dsl_sm90
-except (ImportError, RuntimeError):
+except (ImportError, RuntimeError, AttributeError):
     cp_delta_rule_dsl_sm90 = None  # type: ignore
 
 try:
     from .delta_rule_cp_sm120 import cp_delta_rule_dsl_sm120
-except (ImportError, RuntimeError):
+except (ImportError, RuntimeError, AttributeError):
     cp_delta_rule_dsl_sm120 = None  # type: ignore
 
 __all__ = [

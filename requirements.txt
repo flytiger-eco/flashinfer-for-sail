@@ -1,4 +1,5 @@
-apache-tvm-ffi>=0.1.11,<0.2
+# tvm-ffi-sail uses a 0.1.dev1 version while providing the required API.
+apache-tvm-ffi>=0.1.dev1,!=0.1.8,!=0.1.8.post0,<0.2
 click
 # cuda-python + nccl-extensions: runtime deps for the moe_ep EP transport
 # backends (default since the EP install became opt-out; CUDA-13 wheels only

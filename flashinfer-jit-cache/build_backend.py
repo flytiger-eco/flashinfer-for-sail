@@ -111,6 +111,84 @@ def _create_build_metadata():
 _create_build_metadata()
 
 
+def _compile_jit_cache(output_dir: Path, verbose: bool = True):
+    """Compile AOT modules using flashinfer.aot functions directly."""
+    # Get the project root directory
+    project_root = Path(__file__).parent.parent
+
+    # Ensure 3rdparty submodules are populated (may be empty in CI Docker images).
+    # Skip if submodules are already present or if git metadata is incomplete
+    # (e.g., Docker builds where .git points to a parent repo not in the context).
+    import subprocess
+
+    submodule_check_paths = [
+        project_root / "3rdparty" / "actlize" / "include",
+        project_root / "3rdparty" / "spdlog" / "include",
+        project_root / "3rdparty" / "cccl" / "cub",
+    ]
+    if not all(p.exists() for p in submodule_check_paths):
+        result = subprocess.run(
+            ["git", "submodule", "update", "--init", "--recursive"],
+            cwd=str(project_root),
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            missing = [str(p) for p in submodule_check_paths if not p.exists()]
+            if missing:
+                raise RuntimeError(
+                    f"git submodule update failed and submodules are missing: {missing}\n"
+                    f"git stderr: {result.stderr.decode().strip()}"
+                )
+
+    # Ensure flashinfer/data/ symlinks exist (normally created by the main
+    # package's build_backend, but jit-cache builds may not install the main
+    # package first). Use importlib to avoid name collision with this file.
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "main_build_backend", project_root / "build_backend.py"
+    )
+    main_build_backend = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(main_build_backend)
+    main_build_backend._create_data_dir(use_symlinks=True)
+
+    from flashinfer import aot
+
+    # Set up build directory
+    build_dir = project_root / "build" / "aot"
+
+    # Use the centralized compilation function from aot.py
+    aot.compile_and_package_modules(
+        out_dir=output_dir,
+        build_dir=build_dir,
+        project_root=project_root,
+        config=None,  # Use default config
+        verbose=verbose,
+        skip_prebuilt=False,
+    )
+
+
+def _build_aot_modules():
+    # First, ensure AOT modules are compiled
+    aot_package_dir = Path(__file__).parent / "flashinfer_jit_cache" / "jit_cache"
+    aot_package_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        # Compile AOT modules
+        _compile_jit_cache(aot_package_dir)
+
+        # Verify that some modules were actually compiled
+        so_files = list(aot_package_dir.rglob("*.so"))
+        if not so_files:
+            raise RuntimeError("No .so files were generated during AOT compilation")
+
+        print(f"Successfully compiled {len(so_files)} AOT modules")
+
+    except Exception as e:
+        print(f"Failed to compile AOT modules: {e}")
+        raise
+
+
 def _prepare_build():
     """Generate shim metadata and remove stale monolithic build output."""
     _create_build_metadata()
