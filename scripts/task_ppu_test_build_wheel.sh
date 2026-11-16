@@ -1,22 +1,14 @@
 #!/bin/bash
-set -eo pipefail
-set -x
+# Build the wheel used by the PPU Linux Test (810E) workflow.
+#
+# Adapted for v0.7.1: upstream restructured flashinfer-jit-cache into a
+# provider *shim* package (its wheel build requires
+# FLASHINFER_JIT_CACHE_PROVIDER_ARCHS and contains no FlashInfer code),
+# so the v0.6.17_dev flow of building and installing the jit-cache wheel
+# no longer applies. What this branch actually ships for PPU is the
+# root pure-JIT wheel — the same artifact produced by
+# scripts/task_ppu_build_wheel.sh for ppu-linux-build.yml — so build
+# that and let the workflow stage it from dist/.
+set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
-cd "${ROOT_DIR}/flashinfer-jit-cache"
-export FLASHINFER_CUDA_ARCH_LIST="8.0 8.9"
-pip install -U 'setuptools>=77,<82'
-python -m build --no-isolation --wheel
-
-WHEEL_FILE=$(ls -t dist/*.whl | head -n 1)
-pip install "${WHEEL_FILE}"
-
-cd "${ROOT_DIR}/flashinfer-cubin"
-python -m build --no-isolation --wheel
-python -m pip install dist/*.whl
-
-cd "${ROOT_DIR}"
-python -m pip install -v .
-
-python -c "import flashinfer; print('flashinfer', flashinfer.__version__)"
+exec bash "$(dirname "$0")/task_ppu_build_wheel.sh"

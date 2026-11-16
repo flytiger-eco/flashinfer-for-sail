@@ -43,8 +43,8 @@ jobs:
 
       - name: Stage wheel for PPU test
         run: |
-          mkdir -p wheelhouse/flashinfer-jit-cache
-          cp flashinfer-jit-cache/dist/*.whl wheelhouse/flashinfer-jit-cache/
+          mkdir -p wheelhouse/flashinfer
+          cp dist/*.whl wheelhouse/flashinfer/
           echo "=== wheelhouse ==="
           find wheelhouse -type f -print
 
