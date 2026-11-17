@@ -60,6 +60,7 @@ from .utils import (
     _check_kv_layout,
     _check_pos_encoding_mode,
     _check_workspace_buffer_alignment,
+    check_fa3_backend_device,
     check_shape_dtype_device,
     get_alibi_slopes,
     _get_cache_alibi_slopes_buf,
@@ -1682,6 +1683,8 @@ class BatchPrefillWithPagedKVCacheWrapper:
                 "cute-dsl backend is not yet supported for paged KV cache. "
                 "Use BatchPrefillWithRaggedKVCacheWrapper instead."
             )
+        if backend == "fa3":
+            check_fa3_backend_device(float_workspace_buffer.device)
 
         if jit_args is not None and backend != "cute-dsl":
             if jit_kwargs is None:
@@ -3105,6 +3108,8 @@ class BatchPrefillWithRaggedKVCacheWrapper:
             The keyword arguments to create the JIT module, defaults to None.
         """
         _check_kv_layout(kv_layout)
+        if backend == "fa3":
+            check_fa3_backend_device(float_workspace_buffer.device)
         if jit_args is not None and backend != "cute-dsl":
             if jit_kwargs is None:
                 jit_kwargs = {}
