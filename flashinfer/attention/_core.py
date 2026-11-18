@@ -29,6 +29,7 @@ from ..utils import (
     TensorLayout,
     _check_kv_layout,
     _unpack_paged_kv_cache,
+    check_fa3_backend_device,
     determine_attention_backend,
 )
 from ..prefill import BatchPrefillWithPagedKVCacheWrapper
@@ -370,6 +371,8 @@ class BatchAttentionWithAttentionSinkWrapper(BatchPrefillWithPagedKVCacheWrapper
                 head_dim_qk=head_dim_qk,
                 head_dim_vo=head_dim_vo,
             )
+        if backend == "fa3":
+            check_fa3_backend_device(float_workspace_buffer.device)
 
         jit_args = [
             f"batch_prefill_attention_sink_{filename_safe_dtype_map[q_data_type]}_swa_{window_left >= 0}_{backend}",  # uri

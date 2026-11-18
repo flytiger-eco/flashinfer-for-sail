@@ -613,6 +613,30 @@ def is_sm90a_supported(device: torch.device) -> bool:
     return major == 9 and version_at_least(torch.version.cuda, "12.3")
 
 
+def check_fa3_backend_device(device: torch.device) -> None:
+    """Raise if ``backend="fa3"`` is requested below SM90.
+
+    The fa3 kernels are generated exclusively from the Hopper templates
+    (``batch_prefill_sm90.*`` compiled with ``arch=compute_90a,code=sm_90a``), so
+    the SM90 TMA/mbarrier paths they rely on only exist from compute capability
+    9.0 onwards.  On an older device some drivers still accept the module, and
+    the kernel then launches but never completes, leaving the host spinning
+    forever inside ``torch.cuda.synchronize()`` with no error code.  Rejecting
+    the backend here turns that silent hang into a host-side error.
+    """
+    major, minor = get_compute_capability(device)
+    if major >= 9:
+        return
+    raise RuntimeError(
+        "backend='fa3' requires a Hopper-class device (compute capability >= 9.0), "
+        f"but {torch.cuda.get_device_name(device)!r} reports compute capability "
+        f"({major}, {minor}). fa3 kernels are compiled only from the SM90 templates "
+        "(arch=compute_90a,code=sm_90a); below 9.0 the SM90 TMA/mbarrier paths do "
+        "not exist and the kernel hangs inside cudaDeviceSynchronize() instead of "
+        "raising. Use backend='auto' or backend='fa2' instead."
+    )
+
+
 def is_sm100a_supported(device: torch.device) -> bool:
     major, _ = get_compute_capability(device)
     return major == 10 and version_at_least(torch.version.cuda, "12.8")
