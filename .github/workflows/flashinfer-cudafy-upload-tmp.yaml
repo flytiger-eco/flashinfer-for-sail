@@ -1,6 +1,23 @@
 name: FlashInfer CUDAFY temporary wheel upload
 
 on:
+  workflow_call:
+    inputs:
+      branch:
+        description: 'Source branch in t-head/flashinfer-for-sail (v0.6.18 layout)'
+        type: string
+        default: v0.6.18
+    outputs:
+      upload_url:
+        description: 'Temporary download directory containing the pure JIT wheel'
+        value: ${{ jobs.upload.outputs.upload_url }}
+    secrets:
+      RELEASE_USERNAME:
+        required: true
+      RELEASE_TOKEN:
+        required: true
+      TEMPLATE_TOKEN:
+        required: false
   workflow_dispatch:
     inputs:
       branch:
@@ -11,6 +28,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: cudafy-flashinfer-upload-tmp-${{ inputs.branch || 'v0.6.18' }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -23,6 +44,8 @@ jobs:
       - name: Checkout conversion tools
         uses: actions/checkout@v4
         with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           persist-credentials: false
 
       - name: Set up Python
@@ -34,7 +57,7 @@ jobs:
         id: source
         shell: bash
         env:
-          SOURCE_BRANCH: ${{ inputs.branch }}
+          SOURCE_BRANCH: ${{ inputs.branch || 'v0.6.18' }}
         run: |
           set -euo pipefail
           ref="refs/heads/$SOURCE_BRANCH"
@@ -102,7 +125,9 @@ jobs:
 
       - name: Set artifact name
         id: artifact
-        run: echo "name=flashinfer-cudafy-wheel-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+        run: |
+          suffix=$(python3 -c 'from uuid import uuid4; print(uuid4().hex)')
+          echo "name=flashinfer-cudafy-wheel-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$suffix" >> "$GITHUB_OUTPUT"
 
       - name: Save wheel artifact
         uses: actions/upload-artifact@v4
@@ -122,6 +147,7 @@ jobs:
     secrets:
       release_username: ${{ secrets.RELEASE_USERNAME }}
       release_token: ${{ secrets.RELEASE_TOKEN }}
+      template_token: ${{ secrets.TEMPLATE_TOKEN }}
 
   result:
     name: Show temporary download URL
