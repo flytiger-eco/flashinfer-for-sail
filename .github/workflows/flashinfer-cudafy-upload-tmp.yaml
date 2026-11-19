@@ -1,0 +1,162 @@
+name: FlashInfer CUDAFY temporary wheel upload
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch in t-head/flashinfer-for-sail (v0.6.18 layout)'
+        type: string
+        required: true
+        default: v0.6.18
+      sail_image:
+        description: 'CUDA compatibility build image (empty uses the default)'
+        type: string
+      board:
+        description: 'PPU board used for the CUDA compatibility build'
+        type: choice
+        options: [ZW-M890P, ZW-810E]
+        default: ZW-M890P
+
+permissions:
+  contents: read
+
+env:
+  SAIL_IMAGE: ${{ inputs.sail_image || 'pkg.flytiger-eco.com/docker_release/pytorch:sdk2.2.0-2.13.0-ubuntu24.04-cuda13.0-py312-eic-20261010' }}
+
+jobs:
+  resolve:
+    name: Resolve t-head source commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      commit: ${{ steps.source.outputs.commit }}
+    steps:
+      - name: Resolve source branch
+        id: source
+        shell: bash
+        env:
+          SOURCE_BRANCH: ${{ inputs.branch }}
+        run: |
+          set -euo pipefail
+          ref="refs/heads/$SOURCE_BRANCH"
+          git check-ref-format "$ref"
+          result=$(git ls-remote --exit-code --refs https://github.com/t-head/flashinfer-for-sail.git "$ref")
+          read -r commit resolved_ref <<< "$result"
+          [[ "$commit" =~ ^[0-9a-f]{40}$ && "$resolved_ref" == "$ref" ]]
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          printf 'Source: t-head/flashinfer-for-sail %s (%s)\n' "$SOURCE_BRANCH" "$commit" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: CUDAFY and build wheel
+    needs: resolve
+    runs-on: k8s-runner-group-cpu-flytiger
+    container:
+      image: ghcr.io/actions/actions-runner:latest
+    timeout-minutes: 90
+    outputs:
+      artifact_name: ${{ steps.artifact.outputs.name }}
+    steps:
+      - name: Checkout conversion tools
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build in CUDA compatibility image
+        uses: flytiger-eco/shared-workflows/cluster-task@fc2a1abac44a3fa2c1d96ee5effc3c3eeb739ba8
+        with:
+          image: ${{ env.SAIL_IMAGE }}
+          nnodes: 0
+          nproc_per_node: 1
+          node_selector: board-type=${{ inputs.board }}
+          namespace: ppu-sched
+          timeout_minutes: 75
+          command: |
+            set -eo pipefail
+            unset PIP_INDEX_URL
+            # Drop image-provided URL rewrites to unreachable mirrors.
+            while IFS= read -r key; do
+              git config --global --unset-all "$key"
+            done < <(git config --global --name-only --get-regexp '^url\..*\.insteadof$' | sort -u)
+
+            source /usr/local/PPU_SDK/envsetup.sh
+            export FLASHINFER_CUDA_ARCH_LIST=8.0
+            commit='${{ needs.resolve.outputs.commit }}'
+            python3 - <<'PY'
+            import torch
+            from torch.utils import cpp_extension
+
+            if not torch.version.cuda or getattr(cpp_extension, "IS_PPU_EXTENSION", False):
+                raise SystemExit("CUDA-compatible Torch is required; select a CUDA compatibility image.")
+            PY
+
+            git init /workspace/flashinfer-target
+            cd /workspace/flashinfer-target
+            git fetch --depth 1 https://github.com/t-head/flashinfer-for-sail.git "$commit"
+            git checkout --detach "$commit"
+            git submodule update --init --recursive --depth 1 -- 3rdparty/spdlog 3rdparty/cccl
+            python3 /workspace/source/scripts/cudafy_flashinfer.py "$PWD"
+
+            python3 -m pip install 'setuptools>=77' 'packaging>=24' build wheel twine \
+              'apache-tvm-ffi>=0.1.dev1,!=0.1.8,!=0.1.8.post0,<0.2'
+            FLASHINFER_BUILD_NO_PIP=1 BUILD_NVEP=0 \
+              python3 -m build --no-isolation --wheel
+            python3 -m wheel tags --build "1cudafy${commit:0:12}" --remove dist/*.whl
+            python3 -m twine check dist/*.whl
+            python3 - dist/*.whl "$commit" <<'PY'
+            import sys
+            from zipfile import ZipFile
+
+            wheel, commit = sys.argv[1:]
+            with ZipFile(wheel) as archive:
+                names = set(archive.namelist())
+                required = {
+                    "flashinfer/data/cutlass/include/cutlass/cutlass.h",
+                    "flashinfer/data/csrc/sampling.cu",
+                    "flashinfer/data/include/flashinfer/attention/prefill.cuh",
+                }
+                if missing := required - names:
+                    raise SystemExit(f"Missing wheel contents: {sorted(missing)}")
+                if any(name.startswith("flashinfer/data/sailify/") for name in names):
+                    raise SystemExit("CUDA wheel unexpectedly contains Sailify data")
+                if commit.encode() not in archive.read("flashinfer/_build_meta.py"):
+                    raise SystemExit("Wheel build metadata is missing the source commit")
+            PY
+
+            result_dir="/mnt/wl_nas/devops/cudafy-ci/flashinfer/${{ github.run_id }}/${{ github.run_attempt }}"
+            mkdir -p "$result_dir"
+            cp dist/*.whl "$result_dir/"
+
+      - name: Set artifact name
+        id: artifact
+        run: echo "name=flashinfer-cudafy-wheel-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+
+      - name: Save wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: /wl_nas/devops/cudafy-ci/flashinfer/${{ github.run_id }}/${{ github.run_attempt }}/*.whl
+          if-no-files-found: error
+          compression-level: 0
+
+  upload:
+    name: Upload to temporary wheel directory
+    needs: build
+    uses: flytiger-eco/shared-workflows/.github/workflows/push-tmp-wheel.yml@fc2a1abac44a3fa2c1d96ee5effc3c3eeb739ba8
+    with:
+      artifact_name: ${{ needs.build.outputs.artifact_name }}
+      template_ref: fc2a1abac44a3fa2c1d96ee5effc3c3eeb739ba8
+    secrets:
+      release_username: ${{ secrets.RELEASE_USERNAME }}
+      release_token: ${{ secrets.RELEASE_TOKEN }}
+
+  result:
+    name: Show temporary download URL
+    needs: upload
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Write download URL to Summary
+        env:
+          UPLOAD_URL: ${{ needs.upload.outputs.upload_url }}
+        run: |
+          printf 'Temporary wheel directory: %s\n' "$UPLOAD_URL" | tee -a "$GITHUB_STEP_SUMMARY"
