@@ -8,29 +8,28 @@ on:
         type: string
         required: true
         default: v0.6.18
-      sail_image:
-        description: 'CUDA compatibility build image (empty uses the default)'
-        type: string
-      board:
-        description: 'PPU board used for the CUDA compatibility build'
-        type: choice
-        options: [ZW-M890P, ZW-810E]
-        default: ZW-M890P
 
 permissions:
   contents: read
 
-env:
-  SAIL_IMAGE: ${{ inputs.sail_image || 'pkg.flytiger-eco.com/docker_release/pytorch:sdk2.2.0-2.13.0-ubuntu24.04-cuda13.0-py312-eic-20261010' }}
-
 jobs:
-  resolve:
-    name: Resolve t-head source commit
+  build:
+    name: CUDAFY and package pure JIT wheel
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     outputs:
-      commit: ${{ steps.source.outputs.commit }}
+      artifact_name: ${{ steps.artifact.outputs.name }}
     steps:
+      - name: Checkout conversion tools
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Resolve source branch
         id: source
         shell: bash
@@ -46,64 +45,34 @@ jobs:
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
           printf 'Source: t-head/flashinfer-for-sail %s (%s)\n' "$SOURCE_BRANCH" "$commit" >> "$GITHUB_STEP_SUMMARY"
 
-  build:
-    name: CUDAFY and build wheel
-    needs: resolve
-    runs-on: k8s-runner-group-cpu-flytiger
-    container:
-      image: ghcr.io/actions/actions-runner:latest
-    timeout-minutes: 90
-    outputs:
-      artifact_name: ${{ steps.artifact.outputs.name }}
-    steps:
-      - name: Checkout conversion tools
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
-      - name: Build in CUDA compatibility image
-        uses: flytiger-eco/shared-workflows/cluster-task@fc2a1abac44a3fa2c1d96ee5effc3c3eeb739ba8
-        with:
-          image: ${{ env.SAIL_IMAGE }}
-          nnodes: 0
-          nproc_per_node: 1
-          node_selector: board-type=${{ inputs.board }}
-          namespace: ppu-sched
-          timeout_minutes: 75
-          command: |
-            set -eo pipefail
-            unset PIP_INDEX_URL
-            # Drop image-provided URL rewrites to unreachable mirrors.
-            while IFS= read -r key; do
-              git config --global --unset-all "$key"
-            done < <(git config --global --name-only --get-regexp '^url\..*\.insteadof$' | sort -u)
-
-            source /usr/local/PPU_SDK/envsetup.sh
-            export FLASHINFER_CUDA_ARCH_LIST=8.0
-            commit='${{ needs.resolve.outputs.commit }}'
-            python3 - <<'PY'
-            import torch
-            from torch.utils import cpp_extension
-
-            if not torch.version.cuda or getattr(cpp_extension, "IS_PPU_EXTENSION", False):
-                raise SystemExit("CUDA-compatible Torch is required; select a CUDA compatibility image.")
-            PY
-
-            git init /workspace/flashinfer-target
-            cd /workspace/flashinfer-target
+      - name: Package and verify pure JIT wheel
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+        run: |
+            set -euo pipefail
+            commit="$SOURCE_COMMIT"
+            git init "$RUNNER_TEMP/flashinfer-target"
+            cd "$RUNNER_TEMP/flashinfer-target"
             git fetch --depth 1 https://github.com/t-head/flashinfer-for-sail.git "$commit"
             git checkout --detach "$commit"
-            git submodule update --init --recursive --depth 1 -- 3rdparty/spdlog 3rdparty/cccl
-            python3 /workspace/source/scripts/cudafy_flashinfer.py "$PWD"
+            git submodule update --init --recursive --depth 1 --jobs 2 -- 3rdparty/spdlog 3rdparty/cccl
+            python3 "$GITHUB_WORKSPACE/scripts/cudafy_flashinfer.py" "$PWD"
 
             python3 -m pip install 'setuptools>=77' 'packaging>=24' build wheel twine \
               'apache-tvm-ffi>=0.1.dev1,!=0.1.8,!=0.1.8.post0,<0.2'
-            FLASHINFER_BUILD_NO_PIP=1 BUILD_NVEP=0 \
-              python3 -m build --no-isolation --wheel
-            python3 -m wheel tags --build "1cudafy${commit:0:12}" --remove dist/*.whl
-            python3 -m twine check dist/*.whl
-            python3 - dist/*.whl "$commit" <<'PY'
+            # Dependencies are installed above. Skipping the backend dependency
+            # hook avoids staging the source tree twice. Set the build tag before
+            # packaging so the wheel only needs to be written once.
+            FLASHINFER_BUILD_NO_PIP=1 BUILD_NIXL_EP=0 BUILD_NCCL_EP=0 \
+              python3 -m build --no-isolation --skip-dependency-check --wheel \
+                --outdir "$RUNNER_TEMP/flashinfer-wheels" \
+                --config-setting="--build-option=--build-number=1cudafy${commit:0:12}"
+            wheel="$RUNNER_TEMP/flashinfer-wheels/flashinfer_python-0.6.18-1cudafy${commit:0:12}-py3-none-any.whl"
+            python3 -m twine check "$wheel"
+            python3 - "$wheel" "$commit" <<'PY'
             import sys
+            from pathlib import PurePosixPath
             from zipfile import ZipFile
 
             wheel, commit = sys.argv[1:]
@@ -118,13 +87,18 @@ jobs:
                     raise SystemExit(f"Missing wheel contents: {sorted(missing)}")
                 if any(name.startswith("flashinfer/data/sailify/") for name in names):
                     raise SystemExit("CUDA wheel unexpectedly contains Sailify data")
+                compiled = [
+                    name for name in sorted(names)
+                    if name.startswith("flashinfer/data/aot/")
+                    or set(PurePosixPath(name).suffixes) & {
+                        ".a", ".cubin", ".dll", ".dylib", ".fatbin", ".o", ".ptx", ".pyd", ".so",
+                    }
+                ]
+                if compiled:
+                    raise SystemExit(f"Pure JIT wheel contains compiled files or AOT data: {compiled[:10]}")
                 if commit.encode() not in archive.read("flashinfer/_build_meta.py"):
                     raise SystemExit("Wheel build metadata is missing the source commit")
             PY
-
-            result_dir="/mnt/wl_nas/devops/cudafy-ci/flashinfer/${{ github.run_id }}/${{ github.run_attempt }}"
-            mkdir -p "$result_dir"
-            cp dist/*.whl "$result_dir/"
 
       - name: Set artifact name
         id: artifact
@@ -134,7 +108,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.artifact.outputs.name }}
-          path: /wl_nas/devops/cudafy-ci/flashinfer/${{ github.run_id }}/${{ github.run_attempt }}/*.whl
+          path: ${{ runner.temp }}/flashinfer-wheels/*.whl
           if-no-files-found: error
           compression-level: 0
 
