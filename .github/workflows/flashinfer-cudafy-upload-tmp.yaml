@@ -1,0 +1,162 @@
+name: FlashInfer CUDAFY temporary wheel upload
+
+on:
+  workflow_call:
+    inputs:
+      branch:
+        description: 'Source branch in t-head/flashinfer-for-sail (v0.6.18 layout)'
+        type: string
+        default: v0.6.18
+    outputs:
+      upload_url:
+        description: 'Temporary download directory containing the pure JIT wheel'
+        value: ${{ jobs.upload.outputs.upload_url }}
+    secrets:
+      RELEASE_USERNAME:
+        required: true
+      RELEASE_TOKEN:
+        required: true
+      TEMPLATE_TOKEN:
+        required: false
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch in t-head/flashinfer-for-sail (v0.6.18 layout)'
+        type: string
+        required: true
+        default: v0.6.18
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cudafy-flashinfer-upload-tmp-${{ inputs.branch || 'v0.6.18' }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: CUDAFY and package pure JIT wheel
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      artifact_name: ${{ steps.artifact.outputs.name }}
+    steps:
+      - name: Checkout conversion tools
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Resolve source branch
+        id: source
+        shell: bash
+        env:
+          SOURCE_BRANCH: ${{ inputs.branch || 'v0.6.18' }}
+        run: |
+          set -euo pipefail
+          ref="refs/heads/$SOURCE_BRANCH"
+          git check-ref-format "$ref"
+          result=$(git ls-remote --exit-code --refs https://github.com/t-head/flashinfer-for-sail.git "$ref")
+          read -r commit resolved_ref <<< "$result"
+          [[ "$commit" =~ ^[0-9a-f]{40}$ && "$resolved_ref" == "$ref" ]]
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          printf 'Source: t-head/flashinfer-for-sail %s (%s)\n' "$SOURCE_BRANCH" "$commit" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Package and verify pure JIT wheel
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+        run: |
+            set -euo pipefail
+            commit="$SOURCE_COMMIT"
+            git init "$RUNNER_TEMP/flashinfer-target"
+            cd "$RUNNER_TEMP/flashinfer-target"
+            git fetch --depth 1 https://github.com/t-head/flashinfer-for-sail.git "$commit"
+            git checkout --detach "$commit"
+            git submodule update --init --recursive --depth 1 --jobs 2 -- 3rdparty/spdlog 3rdparty/cccl
+            python3 "$GITHUB_WORKSPACE/scripts/cudafy_flashinfer.py" "$PWD"
+
+            python3 -m pip install 'setuptools>=77' 'packaging>=24' build wheel twine \
+              'apache-tvm-ffi>=0.1.dev1,!=0.1.8,!=0.1.8.post0,<0.2'
+            # Dependencies are installed above. Skipping the backend dependency
+            # hook avoids staging the source tree twice. Set the build tag before
+            # packaging so the wheel only needs to be written once.
+            FLASHINFER_BUILD_NO_PIP=1 BUILD_NIXL_EP=0 BUILD_NCCL_EP=0 \
+              python3 -m build --no-isolation --skip-dependency-check --wheel \
+                --outdir "$RUNNER_TEMP/flashinfer-wheels" \
+                --config-setting="--build-option=--build-number=1cudafy${commit:0:12}"
+            wheel="$RUNNER_TEMP/flashinfer-wheels/flashinfer_python-0.6.18-1cudafy${commit:0:12}-py3-none-any.whl"
+            python3 -m twine check "$wheel"
+            python3 - "$wheel" "$commit" <<'PY'
+            import sys
+            from pathlib import PurePosixPath
+            from zipfile import ZipFile
+
+            wheel, commit = sys.argv[1:]
+            with ZipFile(wheel) as archive:
+                names = set(archive.namelist())
+                required = {
+                    "flashinfer/data/cutlass/include/cutlass/cutlass.h",
+                    "flashinfer/data/csrc/sampling.cu",
+                    "flashinfer/data/include/flashinfer/attention/prefill.cuh",
+                }
+                if missing := required - names:
+                    raise SystemExit(f"Missing wheel contents: {sorted(missing)}")
+                if any(name.startswith("flashinfer/data/sailify/") for name in names):
+                    raise SystemExit("CUDA wheel unexpectedly contains Sailify data")
+                compiled = [
+                    name for name in sorted(names)
+                    if name.startswith("flashinfer/data/aot/")
+                    or set(PurePosixPath(name).suffixes) & {
+                        ".a", ".cubin", ".dll", ".dylib", ".fatbin", ".o", ".ptx", ".pyd", ".so",
+                    }
+                ]
+                if compiled:
+                    raise SystemExit(f"Pure JIT wheel contains compiled files or AOT data: {compiled[:10]}")
+                if commit.encode() not in archive.read("flashinfer/_build_meta.py"):
+                    raise SystemExit("Wheel build metadata is missing the source commit")
+            PY
+
+      - name: Set artifact name
+        id: artifact
+        run: |
+          suffix=$(python3 -c 'from uuid import uuid4; print(uuid4().hex)')
+          echo "name=flashinfer-cudafy-wheel-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$suffix" >> "$GITHUB_OUTPUT"
+
+      - name: Save wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: ${{ runner.temp }}/flashinfer-wheels/*.whl
+          if-no-files-found: error
+          compression-level: 0
+
+  upload:
+    name: Upload to temporary wheel directory
+    needs: build
+    uses: flytiger-eco/shared-workflows/.github/workflows/push-tmp-wheel.yml@fc2a1abac44a3fa2c1d96ee5effc3c3eeb739ba8
+    with:
+      artifact_name: ${{ needs.build.outputs.artifact_name }}
+      template_ref: fc2a1abac44a3fa2c1d96ee5effc3c3eeb739ba8
+    secrets:
+      release_username: ${{ secrets.RELEASE_USERNAME }}
+      release_token: ${{ secrets.RELEASE_TOKEN }}
+      template_token: ${{ secrets.TEMPLATE_TOKEN }}
+
+  result:
+    name: Show temporary download URL
+    needs: upload
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Write download URL to Summary
+        env:
+          UPLOAD_URL: ${{ needs.upload.outputs.upload_url }}
+        run: |
+          printf 'Temporary wheel directory: %s\n' "$UPLOAD_URL" | tee -a "$GITHUB_STEP_SUMMARY"
