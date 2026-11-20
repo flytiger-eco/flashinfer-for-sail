@@ -34,6 +34,31 @@ def test_nvcc_parallelism_flags_use_flashinfer_nvcc_threads(monkeypatch):
     assert cpp_ext.get_nvcc_parallelism_flags() == ["--threads=4"]
 
 
+@pytest.mark.parametrize("ppu_sdk", [None, "/usr/local/PPU_SDK"])
+def test_topk_sources_match_sdk(monkeypatch, ppu_sdk):
+    from flashinfer.jit import topk as jit_topk
+
+    if ppu_sdk is None:
+        monkeypatch.delenv("PPU_SDK", raising=False)
+    else:
+        monkeypatch.setenv("PPU_SDK", ppu_sdk)
+    monkeypatch.setattr(
+        jit_topk, "gen_jit_spec", lambda name, sources, **kwargs: sources
+    )
+    names = [p.name for p in jit_topk.gen_topk_module()]
+    assert "topk.cu" in names
+    assert ("cub_topk.cu" in names) == (ppu_sdk is None)
+    assert ("cub_topk_ppu_stub.cu" in names) == (ppu_sdk is not None)
+
+
+@pytest.mark.parametrize("algo", [None, "cub", "default"])
+def test_ppu_topk_does_not_select_cub(monkeypatch, algo):
+    from flashinfer.topk import can_use_cub_topk
+
+    monkeypatch.setenv("PPU_SDK", "/usr/local/PPU_SDK")
+    assert not can_use_cub_topk(algo, None, 0, False)
+
+
 def test_nvcc_parallelism_flags_ignore_sccache_launcher(monkeypatch):
     monkeypatch.setenv("FLASHINFER_NVCC_THREADS", "4")
     monkeypatch.setenv("FLASHINFER_NVCC_LAUNCHER", "sccache")

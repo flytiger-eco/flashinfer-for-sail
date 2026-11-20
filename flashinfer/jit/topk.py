@@ -14,6 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import os
+
 from . import env as jit_env
 from .core import JitSpec, gen_jit_spec
 
@@ -23,7 +25,8 @@ def gen_topk_module() -> JitSpec:
         "topk",
         [
             jit_env.FLASHINFER_CSRC_DIR / "topk.cu",
-            jit_env.FLASHINFER_CSRC_DIR / "cub_topk.cu",
+            jit_env.FLASHINFER_CSRC_DIR
+            / ("cub_topk_ppu_stub.cu" if "PPU_SDK" in os.environ else "cub_topk.cu"),
             jit_env.FLASHINFER_CSRC_DIR / "flashinfer_topk_binding.cu",
             jit_env.FLASHINFER_CSRC_DIR / "flashinfer_fast_topk_clusters_binding.cu",
         ],
