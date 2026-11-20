@@ -2,7 +2,7 @@ name: PPU Linux Build
 
 on:
   push:
-    branches: [v0.6.18]
+    branches: [v0.7.1]
     paths-ignore:
       - '**.md'
       - 'docs/**'
@@ -12,7 +12,7 @@ on:
       - 'LICENSE'
       - 'NOTICE'
   pull_request:
-    branches: [v0.6.18]
+    branches: [v0.7.1]
     types: [opened, synchronize, reopened, ready_for_review]
     paths-ignore:
       - '**.md'

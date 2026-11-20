@@ -14,16 +14,8 @@
  * limitations under the License.
  */
 
-// PPU (cuda-free) stub for the CUB DeviceBatchedTopK top-k backend.
-//
-// cub_topk.cu depends on the CCCL 2.9 execution-environment header stack
-// (<cuda/__execution/*.h>, <cuda/std/__execution/env.h>), which the
-// cuda-free PPU toolchain does not ship. flashinfer/jit/topk.py stages this
-// file in place of cub_topk.cu when sailify (cuda-free PPU JIT) is enabled,
-// so the module still links: the binding's forward declarations are
-// satisfied and calling the CUB path on PPU raises a clear error instead of
-// failing the whole topk module build (the radix backend remains the
-// default and is what sampling/top_k use).
+// The PPU SDK lacks DeviceBatchedTopK's execution-environment headers.
+// Keep the FFI symbols available so radix top-k can build independently.
 
 #include "tvm_ffi_utils.h"
 
@@ -33,8 +25,8 @@ namespace {
 
 [[noreturn]] void raise_cub_topk_unavailable() {
   TVM_FFI_ICHECK(false)
-      << "cub_topk is unavailable in the cuda-free PPU build: the CUB "
-         "DeviceBatchedTopK backend requires CCCL 2.9 execution-environment "
+      << "cub_topk is unavailable in the PPU build: the CUB "
+         "DeviceBatchedTopK backend requires execution-environment "
          "headers the PPU toolchain does not ship. Use the radix top-k "
          "backend (FLASHINFER_TOPK_ALGO=default) instead.";
   throw;  // unreachable; silences missing-return warnings

@@ -5,7 +5,6 @@ import pytest
 import torch
 
 import flashinfer
-import flashinfer._ppu_env as ppu_env
 from flashinfer.jit import core, cpp_ext
 from flashinfer.jit.attention import modules as attention_modules
 from flashinfer.utils import (
@@ -16,139 +15,48 @@ from flashinfer.utils import (
 from tests.test_helpers import jit_utils
 
 
-def test_ppu_sdk_root_detects_canonical_ci_install(monkeypatch):
-    for name in (
-        "FLASHINFER_JIT_SAILIFY",
-        "PPU_SDK_ROOT",
-        "PPU_PATH",
-        "PPU_SDK",
-        "FLASHINFER_NVCC",
-        "CUDA_SDK",
-        "CUDA_HOME",
-        "CUDA_PATH",
-    ):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(ppu_env.shutil, "which", lambda name: None)
-    monkeypatch.setattr(
-        ppu_env.os.path,
-        "isfile",
-        lambda path: path == "/usr/local/PPU_SDK/bin/hgcc",
-    )
-    monkeypatch.setattr(ppu_env.os, "access", lambda path, mode: True)
+@pytest.mark.parametrize("ppu_sdk", [None, "/usr/local/PPU_SDK"])
+def test_cccl_headers_match_compiler(monkeypatch, tmp_path, ppu_sdk):
+    vendored = tmp_path / "cccl" / "include"
+    monkeypatch.setattr(cpp_ext.jit_env, "CCCL_INCLUDE_DIRS", [vendored])
+    if ppu_sdk is None:
+        monkeypatch.delenv("PPU_SDK", raising=False)
+    else:
+        monkeypatch.setenv("PPU_SDK", ppu_sdk)
 
-    assert ppu_env.ppu_sdk_root() == "/usr/local/PPU_SDK"
-
-
-def test_ppu_sdk_root_uses_envsetup_ppu_path(monkeypatch, tmp_path):
-    for name in (
-        "FLASHINFER_JIT_SAILIFY",
-        "PPU_SDK_ROOT",
-        "PPU_SDK",
-        "FLASHINFER_NVCC",
-        "CUDA_SDK",
-        "CUDA_HOME",
-        "CUDA_PATH",
-    ):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("PPU_PATH", str(tmp_path))
-
-    assert ppu_env.ppu_sdk_root() == str(tmp_path)
-
-
-def test_ppu_sdk_root_detects_hgcc_on_path(monkeypatch):
-    for name in (
-        "FLASHINFER_JIT_SAILIFY",
-        "PPU_SDK_ROOT",
-        "PPU_PATH",
-        "PPU_SDK",
-        "FLASHINFER_NVCC",
-        "CUDA_SDK",
-        "CUDA_HOME",
-        "CUDA_PATH",
-    ):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(
-        ppu_env.shutil,
-        "which",
-        lambda name: "/opt/ppu/bin/hgcc" if name == "hgcc" else None,
-    )
-    monkeypatch.setattr(ppu_env.os.path, "isfile", lambda path: True)
-    monkeypatch.setattr(ppu_env.os, "access", lambda path, mode: True)
-
-    assert ppu_env.ppu_sdk_root() == "/opt/ppu"
-
-
-def test_ppu_sdk_root_normalizes_hgcc_compatibility_persona(monkeypatch):
-    for name in (
-        "FLASHINFER_JIT_SAILIFY",
-        "PPU_SDK_ROOT",
-        "PPU_PATH",
-        "PPU_SDK",
-        "FLASHINFER_NVCC",
-        "CUDA_SDK",
-        "CUDA_HOME",
-        "CUDA_PATH",
-    ):
-        monkeypatch.delenv(name, raising=False)
-    compilers = {
-        "hgcc": "/opt/ppu/CUDA_SDK/bin/hgcc",
-        "nvcc": "/opt/ppu/CUDA_SDK/bin/nvcc",
-    }
-    monkeypatch.setattr(ppu_env.shutil, "which", compilers.get)
-    monkeypatch.setattr(ppu_env.os.path, "isfile", lambda path: True)
-    monkeypatch.setattr(ppu_env.os, "access", lambda path, mode: True)
-
-    assert ppu_env.ppu_sdk_root() == "/opt/ppu"
-
-
-def test_ppu_sdk_root_detects_ppu_nvcc_persona(monkeypatch):
-    for name in (
-        "FLASHINFER_JIT_SAILIFY",
-        "PPU_SDK_ROOT",
-        "PPU_PATH",
-        "PPU_SDK",
-        "FLASHINFER_NVCC",
-        "CUDA_SDK",
-        "CUDA_HOME",
-        "CUDA_PATH",
-    ):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(
-        ppu_env.shutil,
-        "which",
-        lambda name: "/usr/local/PPU_SDK/CUDA_SDK/bin/nvcc",
-    )
-    monkeypatch.setattr(ppu_env.os.path, "isfile", lambda path: True)
-    monkeypatch.setattr(ppu_env.os, "access", lambda path, mode: True)
-
-    assert ppu_env.ppu_sdk_root() == "/usr/local/PPU_SDK"
-
-
-def test_ppu_sdk_root_preserves_cuda_when_nvcc_is_available(monkeypatch):
-    for name in (
-        "FLASHINFER_JIT_SAILIFY",
-        "PPU_SDK_ROOT",
-        "PPU_PATH",
-        "PPU_SDK",
-        "FLASHINFER_NVCC",
-        "CUDA_SDK",
-        "CUDA_HOME",
-        "CUDA_PATH",
-    ):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(
-        ppu_env.shutil, "which", lambda name: "/opt/nvidia/cuda/bin/nvcc"
-    )
-    monkeypatch.setattr(ppu_env.os.path, "isfile", lambda path: True)
-    monkeypatch.setattr(ppu_env.os, "access", lambda path, mode: True)
-
-    assert ppu_env.ppu_sdk_root() is None
+    expected = [vendored.resolve()] if ppu_sdk is None else []
+    assert cpp_ext.get_cccl_includes() == expected
 
 
 def test_nvcc_parallelism_flags_use_flashinfer_nvcc_threads(monkeypatch):
     monkeypatch.setenv("FLASHINFER_NVCC_THREADS", "4")
 
     assert cpp_ext.get_nvcc_parallelism_flags() == ["--threads=4"]
+
+
+@pytest.mark.parametrize("ppu_sdk", [None, "/usr/local/PPU_SDK"])
+def test_topk_sources_match_sdk(monkeypatch, ppu_sdk):
+    from flashinfer.jit import topk as jit_topk
+
+    if ppu_sdk is None:
+        monkeypatch.delenv("PPU_SDK", raising=False)
+    else:
+        monkeypatch.setenv("PPU_SDK", ppu_sdk)
+    monkeypatch.setattr(
+        jit_topk, "gen_jit_spec", lambda name, sources, **kwargs: sources
+    )
+    names = [p.name for p in jit_topk.gen_topk_module()]
+    assert "topk.cu" in names
+    assert ("cub_topk.cu" in names) == (ppu_sdk is None)
+    assert ("cub_topk_ppu_stub.cu" in names) == (ppu_sdk is not None)
+
+
+@pytest.mark.parametrize("algo", [None, "cub", "default"])
+def test_ppu_topk_does_not_select_cub(monkeypatch, algo):
+    from flashinfer.topk import can_use_cub_topk
+
+    monkeypatch.setenv("PPU_SDK", "/usr/local/PPU_SDK")
+    assert not can_use_cub_topk(algo, None, 0, False)
 
 
 def test_nvcc_parallelism_flags_ignore_sccache_launcher(monkeypatch):
@@ -188,11 +96,6 @@ def test_generate_ninja_uses_sccache_compatible_nvcc_depfile_flag(
     assert "--dependency-output" not in ninja
 
 
-@pytest.mark.skipif(
-    ppu_env.ppu_sdk_root() is not None,
-    reason="CUDA gencode flag propagation is not meaningful under the "
-    "cuda-free PPU toolchain (it emits --gpu-architecture=ppu_* instead)",
-)
 def test_generate_ninja_propagates_cuda_arch_flags_to_nvcc_link(monkeypatch, tmp_path):
     monkeypatch.setattr(cpp_ext, "get_cuda_path", lambda: "/usr/local/cuda")
     monkeypatch.setattr(cpp_ext.jit_env, "FLASHINFER_JIT_DIR", tmp_path / "jit")

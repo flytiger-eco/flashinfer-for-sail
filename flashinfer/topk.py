@@ -649,6 +649,10 @@ def can_use_clusters_topk(algo, device, deterministic, tie_break, dsa_graph_safe
 def can_use_cub_topk(algo, input_tensor, tie_break, deterministic, sorted_output=False):
     """Whether the CUB (DeviceBatchedTopK) backend can serve this call."""
 
+    # PPU builds use SDK headers without DeviceBatchedTopK; radix remains available.
+    if "PPU_SDK" in os.environ:
+        return False
+
     # CUB returns unsorted results and has no reproducible-ordering mode, so
     # sorted / deterministic calls fall through to the native backends.
     if sorted_output or deterministic:
