@@ -11,4 +11,9 @@
 # that and let the workflow stage it from dist/.
 set -euo pipefail
 
+# Match the v0.6.18 PPU test environment: the image ships 4.6.0, while
+# FlashInfer requires >=4.6.2a0. Keep the PPU stack on the compatible 4.6.x line
+# rather than allowing the wheel install to pull newer DSL/MLIR APIs.
+python -m pip install 'nvidia-cutlass-dsl==4.6.2'
+
 exec bash "$(dirname "$0")/task_ppu_build_wheel.sh"

@@ -16,27 +16,16 @@ limitations under the License.
 
 from . import env as jit_env
 from .core import JitSpec, gen_jit_spec
-from .sailify_staging import sailify_enabled
 
 
 def gen_topk_module() -> JitSpec:
-    sources = [
-        jit_env.FLASHINFER_CSRC_DIR / "topk.cu",
-        # cub_topk.cu needs the CCCL 2.9 execution-environment headers
-        # (<cuda/__execution/*.h>) that the cuda-free PPU toolchain does not
-        # ship; stage link-satisfying stubs instead so the module (and the
-        # default radix backend) still builds on PPU.
-        jit_env.FLASHINFER_CSRC_DIR
-        / (
-            "cub_topk_ppu_stub.cu"
-            if sailify_enabled()
-            else "cub_topk.cu"
-        ),
-        jit_env.FLASHINFER_CSRC_DIR / "flashinfer_topk_binding.cu",
-        jit_env.FLASHINFER_CSRC_DIR / "flashinfer_fast_topk_clusters_binding.cu",
-    ]
     return gen_jit_spec(
         "topk",
-        sources,
+        [
+            jit_env.FLASHINFER_CSRC_DIR / "topk.cu",
+            jit_env.FLASHINFER_CSRC_DIR / "cub_topk.cu",
+            jit_env.FLASHINFER_CSRC_DIR / "flashinfer_topk_binding.cu",
+            jit_env.FLASHINFER_CSRC_DIR / "flashinfer_fast_topk_clusters_binding.cu",
+        ],
         extra_cuda_cflags=["-lineinfo"],
     )

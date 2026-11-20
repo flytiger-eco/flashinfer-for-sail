@@ -46,6 +46,14 @@ This document only covers the basic installation, verification, and usage workfl
 
 ## PPU Support
 
+This branch adapts FlashInfer v0.7.1 using the same CUDA-compatible SAIL SDK
+build path as v0.6.18. Source builds retain the upstream `3rdparty/cutlass`
+submodule; actlize and online sailify conversion are not required. Initialize
+submodules with `git submodule update --init --recursive` and use the SDK's
+CUDA-compatible compiler environment (`PPU_SDK` enables the PPU kernel flags).
+The PPU CI builds the root pure-JIT wheel; v0.7.1's `flashinfer-jit-cache`
+package is a provider shim, rather than the monolithic cache used by v0.6.18.
+
 | Hardware | Architecture |
 |--------------|-------------------|
 | ZhenWu 810e | ppu001 |

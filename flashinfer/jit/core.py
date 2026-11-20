@@ -25,7 +25,6 @@ from filelock import FileLock
 from ..compilation_context import CompilationContext
 from . import env as jit_env
 from .cpp_ext import generate_ninja_build_for_op, get_nvcc_parallelism_flags, run_ninja
-from . import sailify_staging
 from .utils import write_if_different
 
 os.makedirs(jit_env.FLASHINFER_WORKSPACE_DIR, exist_ok=True)
@@ -517,21 +516,13 @@ class JitSpecNvcc(JitSpec):
             if self.embedded_cubin_factory is not None
             else None
         )
-        sources = self.sources
-        extra_include_dirs = self.extra_include_dirs
-        # cuda-free (PPU) builds compile from a sailify-staged mirror tree so
-        # the upstream CUDA sources are never modified in place.
-        if sailify_staging.sailify_enabled():
-            sources, extra_include_dirs = sailify_staging.stage_module(
-                self.name, sources, extra_include_dirs
-            )
         content = generate_ninja_build_for_op(
             name=self.name,
-            sources=sources,
+            sources=self.sources,
             extra_cflags=self.extra_cflags,
             extra_cuda_cflags=self.extra_cuda_cflags,
             extra_ldflags=self.extra_ldflags,
-            extra_include_dirs=extra_include_dirs,
+            extra_include_dirs=self.extra_include_dirs,
             needs_device_linking=self.needs_device_linking,
             embedded_cubins=embedded_cubins,
             extra_cuda_cflags_by_source=self.extra_cuda_cflags_by_source,
@@ -662,15 +653,9 @@ class JitSpecNvcc(JitSpec):
             for source, flags in (self.extra_cuda_cflags_by_source or {}).items()
         }
 
-        # Get compilers. PPU builds use the native hgcc driver so generated
-        # registration stubs match libhggcrt's __hggc* ABI.
+        # Get compilers
         cxx = os.environ.get("CXX", "c++")
-        nvcc_default = (
-            f"{cuda_home}/bin/hgcc"
-            if sailify_staging.ppu_sdk_root()
-            else f"{cuda_home}/bin/nvcc"
-        )
-        nvcc = os.environ.get("FLASHINFER_NVCC", nvcc_default)
+        nvcc = os.environ.get("FLASHINFER_NVCC", f"{cuda_home}/bin/nvcc")
 
         # Build directory
         build_dir = str(self.build_dir.resolve())
