@@ -40,7 +40,7 @@ DESELECT=(
 echo '=== Run unit tests (PPU subset) ==='
 set +e
 pytest --continue-on-collection-errors \
-  -v -ra --tb=short --color=yes \
+  -v -ra --tb=short --color=yes --maxfail=1 \
   "${DESELECT[@]}" \
   tests/jit/test_jit_cpp_ext.py \
   tests/autotuner/test_autotuner_configs.py \
