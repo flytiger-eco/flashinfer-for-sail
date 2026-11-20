@@ -15,6 +15,19 @@ from flashinfer.utils import (
 from tests.test_helpers import jit_utils
 
 
+@pytest.mark.parametrize("ppu_sdk", [None, "/usr/local/PPU_SDK"])
+def test_cccl_headers_match_compiler(monkeypatch, tmp_path, ppu_sdk):
+    vendored = tmp_path / "cccl" / "include"
+    monkeypatch.setattr(cpp_ext.jit_env, "CCCL_INCLUDE_DIRS", [vendored])
+    if ppu_sdk is None:
+        monkeypatch.delenv("PPU_SDK", raising=False)
+    else:
+        monkeypatch.setenv("PPU_SDK", ppu_sdk)
+
+    expected = [vendored.resolve()] if ppu_sdk is None else []
+    assert cpp_ext.get_cccl_includes() == expected
+
+
 def test_nvcc_parallelism_flags_use_flashinfer_nvcc_threads(monkeypatch):
     monkeypatch.setenv("FLASHINFER_NVCC_THREADS", "4")
 

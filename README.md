@@ -51,6 +51,8 @@ build path as v0.6.18. Source builds retain the upstream `3rdparty/cutlass`
 submodule; actlize and online sailify conversion are not required. Initialize
 submodules with `git submodule update --init --recursive` and use the SDK's
 CUDA-compatible compiler environment (`PPU_SDK` enables the PPU kernel flags).
+PPU compilation uses the SDK's matching CCCL headers; NVIDIA CUDA builds use
+the vendored CCCL submodule.
 The PPU CI builds the root pure-JIT wheel; v0.7.1's `flashinfer-jit-cache`
 package is a provider shim, rather than the monolithic cache used by v0.6.18.
 

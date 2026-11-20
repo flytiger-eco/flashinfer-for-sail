@@ -130,6 +130,11 @@ def join_multiline(vs: List[str]) -> str:
 
 def get_cccl_includes() -> List:
     """Get vendored CCCL include directories (added with -I for CTK override precedence)."""
+    # The PPU CUDA-compatible compiler needs its matching SDK headers. Newer
+    # vendored CCCL assumes CUDA 13 compiler features it does not implement
+    # (for example C++17 static call operators).
+    if "PPU_SDK" in os.environ:
+        return []
     return [p.resolve() for p in jit_env.CCCL_INCLUDE_DIRS]
 
 
