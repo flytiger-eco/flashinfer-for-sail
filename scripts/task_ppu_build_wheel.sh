@@ -39,10 +39,11 @@ echo ""
 echo "========================================"
 echo "Installing build dependencies"
 echo "========================================"
-pip install packaging setuptools build pyproject_hooks --force-reinstall --no-deps
+# PPU PyTorch requires setuptools<82; v0.7.1 requires TVM-FFI>=0.1.11.
+pip install packaging 'setuptools>=77,<82' build pyproject_hooks --force-reinstall --no-deps
 pip install --upgrade filelock
 pip install tomli
-pip install apache-tvm-ffi
+pip install 'apache-tvm-ffi==0.1.11'
 pip install pynvml==13.0.1
 
 echo ""
