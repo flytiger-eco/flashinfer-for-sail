@@ -38,8 +38,14 @@ jobs:
     name: CUDAFY and package pure JIT wheel
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      SOURCE_REPO: t-head/flashinfer-for-sail
     outputs:
       artifact_name: ${{ steps.artifact.outputs.name }}
+      repo: ${{ steps.package.outputs.repo }}
+      commit: ${{ steps.package.outputs.commit }}
+      branch: ${{ steps.package.outputs.branch }}
+      tag: ${{ steps.package.outputs.tag }}
     steps:
       - name: Checkout conversion tools
         uses: actions/checkout@v4
@@ -62,13 +68,14 @@ jobs:
           set -euo pipefail
           ref="refs/heads/$SOURCE_BRANCH"
           git check-ref-format "$ref"
-          result=$(git ls-remote --exit-code --refs https://github.com/t-head/flashinfer-for-sail.git "$ref")
+          result=$(git ls-remote --exit-code --refs "https://github.com/$SOURCE_REPO.git" "$ref")
           read -r commit resolved_ref <<< "$result"
           [[ "$commit" =~ ^[0-9a-f]{40}$ && "$resolved_ref" == "$ref" ]]
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
-          printf 'Source: t-head/flashinfer-for-sail %s (%s)\n' "$SOURCE_BRANCH" "$commit" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Source: %s %s (%s)\n' "$SOURCE_REPO" "$SOURCE_BRANCH" "$commit" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Package and verify pure JIT wheel
+        id: package
         shell: bash
         env:
           SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
@@ -77,8 +84,18 @@ jobs:
             commit="$SOURCE_COMMIT"
             git init "$RUNNER_TEMP/flashinfer-target"
             cd "$RUNNER_TEMP/flashinfer-target"
-            git fetch --depth 1 https://github.com/t-head/flashinfer-for-sail.git "$commit"
+            git fetch --depth 1 "https://github.com/$SOURCE_REPO.git" "$commit"
             git checkout --detach "$commit"
+            [[ "$(git rev-parse HEAD)" == "$commit" ]]
+            # 按实际 checkout 的 commit 匹配轻量和附注 tag，不依赖浅克隆中的本地 tag。
+            tags=$(git ls-remote --tags "https://github.com/$SOURCE_REPO.git" \
+              | awk -v commit="$commit" '$1 == commit { sub(/^refs\/tags\//, "", $2); sub(/\^\{\}$/, "", $2); print $2 }' \
+              | sort -u | paste -sd ',' -)
+            printf 'repo=%s\n' "$SOURCE_REPO" >> "$GITHUB_OUTPUT"
+            printf 'commit=%s\n' "$commit" >> "$GITHUB_OUTPUT"
+            # 仅记录实际构建 checkout 的分支；detached HEAD 时为空，不使用输入或默认值。
+            printf 'branch=%s\n' "$(git symbolic-ref --quiet --short HEAD || true)" >> "$GITHUB_OUTPUT"
+            printf 'tag=%s\n' "$tags" >> "$GITHUB_OUTPUT"
             git submodule update --init --recursive --depth 1 --jobs 2 -- 3rdparty/spdlog 3rdparty/cccl
             python3 "$GITHUB_WORKSPACE/scripts/cudafy_flashinfer.py" "$PWD"
 
@@ -140,10 +157,14 @@ jobs:
   upload:
     name: Upload to temporary wheel directory
     needs: build
-    uses: flytiger-eco/shared-workflows/.github/workflows/push-tmp-wheel.yml@fc2a1abac44a3fa2c1d96ee5effc3c3eeb739ba8
+    uses: flytiger-eco/shared-workflows/.github/workflows/push-tmp-wheel.yml@main
     with:
       artifact_name: ${{ needs.build.outputs.artifact_name }}
-      template_ref: fc2a1abac44a3fa2c1d96ee5effc3c3eeb739ba8
+      repo: ${{ needs.build.outputs.repo }}
+      commit: ${{ needs.build.outputs.commit }}
+      branch: ${{ needs.build.outputs.branch }}
+      tag: ${{ needs.build.outputs.tag }}
+      template_ref: main
     secrets:
       release_username: ${{ secrets.RELEASE_USERNAME }}
       release_token: ${{ secrets.RELEASE_TOKEN }}
