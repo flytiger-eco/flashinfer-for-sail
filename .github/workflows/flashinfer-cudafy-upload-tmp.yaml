@@ -4,9 +4,9 @@ on:
   workflow_call:
     inputs:
       branch:
-        description: 'Source branch in t-head/flashinfer-for-sail (v0.6.18 layout)'
+        description: '源码分支；按 version.txt 匹配官方 tag 的 CUDA 配置'
         type: string
-        default: v0.6.18
+        required: true
     outputs:
       upload_url:
         description: 'Temporary download directory containing the pure JIT wheel'
@@ -21,16 +21,15 @@ on:
   workflow_dispatch:
     inputs:
       branch:
-        description: 'Branch in t-head/flashinfer-for-sail (v0.6.18 layout)'
+        description: '源码分支；按 version.txt 匹配官方 tag 的 CUDA 配置'
         type: string
         required: true
-        default: v0.6.18
 
 permissions:
   contents: read
 
 concurrency:
-  group: cudafy-flashinfer-upload-tmp-${{ inputs.branch || 'v0.6.18' }}-${{ github.ref }}
+  group: cudafy-flashinfer-upload-tmp-${{ inputs.branch }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -59,11 +58,14 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Test CUDA configuration restoration
+        run: python3 -m unittest discover -s scripts/tests -p 'test_cudafy_flashinfer.py' -v
+
       - name: Resolve source branch
         id: source
         shell: bash
         env:
-          SOURCE_BRANCH: ${{ inputs.branch || 'v0.6.18' }}
+          SOURCE_BRANCH: ${{ inputs.branch }}
         run: |
           set -euo pipefail
           ref="refs/heads/$SOURCE_BRANCH"
@@ -96,28 +98,67 @@ jobs:
             # 仅记录实际构建 checkout 的分支；detached HEAD 时为空，不使用输入或默认值。
             printf 'branch=%s\n' "$(git symbolic-ref --quiet --short HEAD || true)" >> "$GITHUB_OUTPUT"
             printf 'tag=%s\n' "$tags" >> "$GITHUB_OUTPUT"
-            git submodule update --init --recursive --depth 1 --jobs 2 -- 3rdparty/spdlog 3rdparty/cccl
             python3 "$GITHUB_WORKSPACE/scripts/cudafy_flashinfer.py" "$PWD"
 
-            python3 -m pip install 'setuptools>=77' 'packaging>=24' build wheel twine \
-              'apache-tvm-ffi>=0.1.dev1,!=0.1.8,!=0.1.8.post0,<0.2'
-            # Dependencies are installed above. Skipping the backend dependency
-            # hook avoids staging the source tree twice. Set the build tag before
-            # packaging so the wheel only needs to be written once.
-            FLASHINFER_BUILD_NO_PIP=1 BUILD_NIXL_EP=0 BUILD_NCCL_EP=0 \
+            python3 -m pip install build wheel twine
+            # 构建依赖取自刚还原的官方 tag，不固定 TVM-FFI 等依赖版本。
+            python3 - <<'PY'
+            import subprocess
+            import sys
+            import tomllib
+            from pathlib import Path
+
+            project = tomllib.loads(Path("pyproject.toml").read_text())
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", *project["build-system"]["requires"]],
+                check=True,
+            )
+            PY
+            # 禁止原生 EP 编译和额外 pip 安装；只打包纯 JIT 源码。
+            FLASHINFER_BUILD_NO_PIP=1 BUILD_NVEP=0 BUILD_NIXL_EP=0 BUILD_NCCL_EP=0 \
               python3 -m build --no-isolation --skip-dependency-check --wheel \
                 --outdir "$RUNNER_TEMP/flashinfer-wheels" \
                 --config-setting="--build-option=--build-number=1cudafy${commit:0:12}"
-            wheel="$RUNNER_TEMP/flashinfer-wheels/flashinfer_python-0.6.18-1cudafy${commit:0:12}-py3-none-any.whl"
+            shopt -s nullglob
+            wheels=("$RUNNER_TEMP/flashinfer-wheels/"*.whl)
+            if [[ "${#wheels[@]}" -ne 1 ]]; then
+              printf 'Expected exactly one wheel, found %s\n' "${#wheels[@]}" >&2
+              exit 1
+            fi
+            wheel="${wheels[0]}"
             python3 -m twine check "$wheel"
             python3 - "$wheel" "$commit" <<'PY'
             import sys
-            from pathlib import PurePosixPath
+            import tomllib
+            from email.parser import BytesParser
+            from pathlib import Path, PurePosixPath
             from zipfile import ZipFile
 
+            from packaging.utils import canonicalize_name, parse_wheel_filename
+            from packaging.version import Version
+
             wheel, commit = sys.argv[1:]
+            project = tomllib.loads(Path("pyproject.toml").read_text())
+            expected_name = canonicalize_name(project["project"]["name"])
+            expected_version = Version(Path("version.txt").read_text().strip())
+            name, version, build_tag, tags = parse_wheel_filename(Path(wheel).name)
+            if name != expected_name or version != expected_version:
+                raise SystemExit(f"Wheel identity mismatch: {name} {version}")
+            if build_tag != (1, f"cudafy{commit[:12]}"):
+                raise SystemExit(f"Wheel build tag mismatch: {build_tag}")
+            if any(tag.abi != "none" or tag.platform != "any" for tag in tags):
+                raise SystemExit(f"Wheel is not platform-independent: {tags}")
             with ZipFile(wheel) as archive:
                 names = set(archive.namelist())
+                metadata_files = [name for name in names if name.endswith(".dist-info/METADATA")]
+                if len(metadata_files) != 1:
+                    raise SystemExit("Expected exactly one wheel METADATA file")
+                metadata = BytesParser().parsebytes(archive.read(metadata_files[0]))
+                if (
+                    canonicalize_name(metadata["Name"]) != expected_name
+                    or Version(metadata["Version"]) != expected_version
+                ):
+                    raise SystemExit("Wheel metadata does not match the source project")
                 required = {
                     "flashinfer/data/cutlass/include/cutlass/cutlass.h",
                     "flashinfer/data/csrc/sampling.cu",
