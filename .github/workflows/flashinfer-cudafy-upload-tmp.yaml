@@ -172,7 +172,7 @@ jobs:
                     name for name in sorted(names)
                     if name.startswith("flashinfer/data/aot/")
                     or set(PurePosixPath(name).suffixes) & {
-                        ".a", ".cubin", ".dll", ".dylib", ".fatbin", ".o", ".ptx", ".pyd", ".so",
+                        ".a", ".cubin", ".dll", ".dylib", ".fatbin", ".o", ".pyd", ".so",
                     }
                 ]
                 if compiled:
