@@ -4,11 +4,13 @@ import importlib.util
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from zipfile import ZipFile
 
 SCRIPT = Path(__file__).resolve().parents[1] / "cudafy_flashinfer.py"
 spec = importlib.util.spec_from_file_location("cudafy_flashinfer", SCRIPT)
@@ -271,6 +273,83 @@ class RestoreConfigTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             checked += 1
         self.assertGreaterEqual(checked, 4)
+
+
+class WheelValidationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(dir=SCRIPT.parent.parent)
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.commit = "a" * 40
+        self.wheel = self.root / (
+            f"flashinfer_python-0.7.1-1cudafy{self.commit[:12]}-py3-none-any.whl"
+        )
+        (self.root / "pyproject.toml").write_text(
+            '[project]\nname = "flashinfer-python"\n'
+        )
+        (self.root / "version.txt").write_text("0.7.1\n")
+        workflow = (
+            SCRIPT.parent.parent / ".github/workflows/flashinfer-cudafy-upload-tmp.yaml"
+        )
+        blocks = re.findall(
+            r"<<'PY'\n(.*?)\n            PY", workflow.read_text(), flags=re.DOTALL
+        )
+        self.assertEqual(len(blocks), 2)
+        self.validator = textwrap.dedent(blocks[1])
+
+    def validate(self, extra_files):
+        # 执行工作流原有校验代码，使用真实 ZIP 结构而不模拟归档读取。
+        with ZipFile(self.wheel, "w") as archive:
+            archive.writestr(
+                "flashinfer_python-0.7.1.dist-info/METADATA",
+                "Name: flashinfer-python\nVersion: 0.7.1\n",
+            )
+            archive.writestr("flashinfer/_build_meta.py", self.commit)
+            for name in (
+                "flashinfer/data/cutlass/include/cutlass/cutlass.h",
+                "flashinfer/data/csrc/sampling.cu",
+                "flashinfer/data/include/flashinfer/attention/prefill.cuh",
+                *extra_files,
+            ):
+                archive.writestr(name, "")
+        return subprocess.run(
+            [sys.executable, "-c", self.validator, str(self.wheel), self.commit],
+            cwd=self.root,
+            text=True,
+            capture_output=True,
+        )
+
+    def test_allows_ptx_sources(self):
+        result = self.validate(
+            [
+                "flashinfer/data/csrc/experimental/deepgemm_fp8_gemm/generated/"
+                f"{arch}/kernel_{index}.ptx"
+                for arch in ("sm_100a", "sm_103a")
+                for index in range(2)
+            ]
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_still_rejects_binaries_and_aot_data(self):
+        names = [
+            f"flashinfer/data/csrc/kernel{suffix}"
+            for suffix in (
+                ".a",
+                ".cubin",
+                ".dll",
+                ".dylib",
+                ".fatbin",
+                ".o",
+                ".pyd",
+                ".so",
+            )
+        ]
+        names.append("flashinfer/data/aot/kernel.ptx")
+        for name in names:
+            with self.subTest(name=name):
+                result = self.validate([name])
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("compiled files or AOT data", result.stderr)
 
 
 if __name__ == "__main__":
