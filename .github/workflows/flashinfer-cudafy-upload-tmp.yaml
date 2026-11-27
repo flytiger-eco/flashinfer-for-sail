@@ -58,6 +58,9 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Install test dependencies
+        run: python3 -m pip install packaging
+
       - name: Test CUDA configuration restoration
         run: python3 -m unittest discover -s scripts/tests -p 'test_cudafy_flashinfer.py' -v
 
