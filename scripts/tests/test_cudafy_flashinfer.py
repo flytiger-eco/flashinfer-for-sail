@@ -240,6 +240,17 @@ class RestoreConfigTests(unittest.TestCase):
                             self.tree[target.relative_to(self.source).as_posix()][1],
                         )
 
+    def test_workflow_installs_packaging_before_tests(self):
+        workflow = (
+            SCRIPT.parent.parent / ".github/workflows/flashinfer-cudafy-upload-tmp.yaml"
+        )
+        content = workflow.read_text()
+        setup = content.index("      - name: Set up Python")
+        install = content.index("        run: python3 -m pip install packaging")
+        tests = content.index("        run: python3 -m unittest discover")
+        self.assertLess(setup, install)
+        self.assertLess(install, tests)
+
     def test_workflow_has_no_fixed_version_or_dependency(self):
         workflow = (
             SCRIPT.parent.parent / ".github/workflows/flashinfer-cudafy-upload-tmp.yaml"
